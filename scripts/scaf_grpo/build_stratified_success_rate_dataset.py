@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
 def bucket_for_success_rate(success_rate: float) -> str:
     if success_rate <= 0:
         return "hard"
-    if success_rate < 0.5:
+    if success_rate <= 0.5:
         return "medium"
     return "easy"
 

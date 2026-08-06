@@ -531,27 +531,31 @@ class RayPPOTrainer:
         metric_dict: dict,
         prefix_parts: list[str],
         var2metric2val: dict,
-        core_group: bool = False,
     ):
-        core_var = "acc" if "acc" in var2metric2val else "reward"
-        for var_name, metric2val in var2metric2val.items():
-            n_values = [self._validation_metric_n(name) for name in metric2val.keys()]
-            n_values = [value for value in n_values if value is not None]
-            n_max = max(n_values) if n_values else None
-            for metric_name, metric_val in metric2val.items():
-                metric_n = self._validation_metric_n(metric_name)
-                if n_max is not None and metric_n is not None and metric_n < n_max:
-                    continue
+        """Add core validation performance and response-length metrics for one group."""
 
-                is_core_score = (
-                    core_group
-                    and var_name == core_var
-                    and metric_name in {f"mean@{n_max}", f"pass@{n_max}/mean"}
-                )
-                is_core_tokens = core_group and var_name == "response_tokens" and metric_name == f"mean@{n_max}"
-                metric_sec = "val-core" if is_core_score or is_core_tokens else "val-aux"
-                pfx = "/".join([metric_sec, *prefix_parts, var_name, metric_name])
-                metric_dict[pfx] = metric_val
+        core_var = "acc" if "acc" in var2metric2val else "reward"
+        core_metrics = var2metric2val.get(core_var, {})
+        core_n_values = [self._validation_metric_n(name) for name in core_metrics]
+        core_n_values = [value for value in core_n_values if value is not None]
+        core_n_max = max(core_n_values) if core_n_values else None
+
+        if core_n_max is not None:
+            for metric_name in (f"mean@{core_n_max}", f"pass@{core_n_max}/mean"):
+                if metric_name in core_metrics:
+                    pfx = "/".join(["val-core", *prefix_parts, core_var, metric_name])
+                    metric_dict[pfx] = core_metrics[metric_name]
+
+        # Response length is always logged for every validation group:
+        # total/all and difficulty/{easy, medium, hard}.
+        token_metrics = var2metric2val.get("response_tokens", {})
+        token_n_values = [self._validation_metric_n(name) for name in token_metrics]
+        token_n_values = [value for value in token_n_values if value is not None]
+        token_n_max = max(token_n_values) if token_n_values else None
+        token_metric_name = f"mean@{token_n_max}" if token_n_max is not None else None
+        if token_metric_name is not None and token_metric_name in token_metrics:
+            pfx = "/".join(["val-core", *prefix_parts, "response_tokens", token_metric_name])
+            metric_dict[pfx] = token_metrics[token_metric_name]
 
     def _add_validation_metric_group(
         self,
@@ -582,7 +586,6 @@ class RayPPOTrainer:
                 metric_dict=metric_dict,
                 prefix_parts=[group_name, label],
                 var2metric2val=var2metric2val,
-                core_group=True,
             )
 
     def _dump_validation_metrics(self, metric_dict: dict, dump_path: str):
@@ -725,7 +728,6 @@ class RayPPOTrainer:
         return gen_batch
 
     def _validate(self):
-        data_source_lst = []
         difficulty_bucket_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -734,7 +736,6 @@ class RayPPOTrainer:
         sample_outputs = []
         sample_gts = []
         sample_scores = []
-        sample_turns = []
         sample_uids = []
 
         for test_data in self.val_dataloader:
@@ -825,11 +826,6 @@ class RayPPOTrainer:
                 else:
                     reward_extra_infos_dict[key].extend(values if isinstance(values, list) else [values])
 
-            # collect num_turns of each prompt
-            if "__num_turns__" in test_batch.non_tensor_batch:
-                sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
-
-            data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
             difficulty_bucket_lst.append(
                 test_batch.non_tensor_batch.get("difficulty_bucket", ["unknown"] * reward_tensor.shape[0])
             )
@@ -853,18 +849,9 @@ class RayPPOTrainer:
         for key_info, lst in reward_extra_infos_dict.items():
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
 
-        data_sources = np.concatenate(data_source_lst, axis=0)
-
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+        # Keep validation logging compact: overall performance and difficulty
+        # breakdown only. Per-data-source and val-aux metrics are omitted.
         metric_dict = {}
-        for data_source, var2metric2val in data_src2var2metric2val.items():
-            self._add_processed_validation_metrics(
-                metric_dict=metric_dict,
-                prefix_parts=[data_source],
-                var2metric2val=var2metric2val,
-                core_group=False,
-            )
-
         self._add_validation_metric_group(
             metric_dict=metric_dict,
             group_name="total",
@@ -880,12 +867,6 @@ class RayPPOTrainer:
             reward_extra_infos_dict=reward_extra_infos_dict,
             valid_labels={"easy", "medium", "hard"},
         )
-
-        if len(sample_turns) > 0:
-            sample_turns = np.concatenate(sample_turns)
-            metric_dict["val-aux/num_turns/min"] = sample_turns.min()
-            metric_dict["val-aux/num_turns/max"] = sample_turns.max()
-            metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
         if val_data_dir:
             self._dump_validation_metrics(metric_dict, val_data_dir)
@@ -1455,18 +1436,6 @@ class RayPPOTrainer:
         # token-level reward聚合成traj-level，reward_tensor_first: [B × rollout.n, max_response_length],对最后一维求和
         reward_sums = reward_tensor_first.sum(-1).detach().cpu().numpy() 
 
-        def _safe_mean(values) -> float:
-            values = list(values)
-            return float(np.mean(values)) if values else 0.0
-
-        def _safe_min(values) -> float:
-            values = list(values)
-            return float(np.min(values)) if values else 0.0
-
-        def _safe_max(values) -> float:
-            values = list(values)
-            return float(np.max(values)) if values else 0.0
-
         uid_to_indices: dict[Any, list[int]] = defaultdict(list) # 根据uid把一道题的rollout分组
         for idx, uid in enumerate(batch.non_tensor_batch["uid"]):
             uid_to_indices[uid].append(idx)
@@ -1477,32 +1446,18 @@ class RayPPOTrainer:
             for uid, indices in uid_to_indices.items()
             if len(indices) > 0 and np.all(reward_sums[indices] <= 0)
         }
-        failed_reward_values = [
-            float(reward_sums[idx])
-            for uid, indices in uid_to_indices.items()
-            if uid in failed_uids
-            for idx in indices
-        ]
+        # Hint effectiveness is measured at UID/group level:
+        # denominator = questions whose first rollout group has pass@k == 0;
+        # numerator = those questions for which at least one hinted rollout is correct.
         scaf_metrics = {
-            "batch/scaf_initial_failed_uid": len(failed_uids),
-            "batch/scaf_initial_failed_uid_rate": len(failed_uids) / max(len(uid_to_indices), 1),
-            "batch/scaf_initial_reward_mean": _safe_mean(reward_sums),
-            "batch/scaf_failed_reward_before_hint_mean": _safe_mean(failed_reward_values),
-            "batch/scaf_failed_reward_before_hint_min": _safe_min(failed_reward_values),
-            "batch/scaf_failed_reward_before_hint_max": _safe_max(failed_reward_values),
-            "batch/scaf_hint_candidate_count": 0,
-            "batch/scaf_hint_candidate_success_rate": 0.0,
-            "batch/scaf_hint_solved_uid": 0,
-            "batch/scaf_hint_uid_success_rate": 0.0,
-            "batch/scaf_hint_selected_level_mean": 0.0,
-            "batch/scaf_hint_selected_level_min": 0.0,
-            "batch/scaf_hint_selected_level_max": 0.0,
-            "batch/scaf_hint_reward_after_hint_mean": 0.0,
-            "batch/scaf_hint_reward_after_hint_min": 0.0,
-            "batch/scaf_hint_reward_after_hint_max": 0.0,
-            "batch/scaf_hint_replaced": 0,
-            "batch/scaf_expert_replaced": 0,
+            "batch/scaf_initial_failed_uid_count": len(failed_uids),
+            "batch/scaf_hint_rescued_uid_count": 0,
+            "batch/scaf_hint_rescue_rate": 0.0,
         }
+        # Mutually exclusive counts: each rescued UID is assigned to the lowest
+        # successful Hint level, matching the actual replacement rule below.
+        for level in range(1, self.hint_stage_count + 1):
+            scaf_metrics[f"batch/scaf_selected_hint_level_{level}_uid_count"] = 0
         if not failed_uids:
             metrics.update(scaf_metrics)
             return batch, reward_tensor_first, reward_extra_infos_dict_first, False
@@ -1548,14 +1503,6 @@ class RayPPOTrainer:
                 hint_reward_sums = reward_tensor_hint.sum(-1).detach().cpu().numpy()
                 hint_uids = hinted_output.non_tensor_batch["uid"]
                 hint_levels = hinted_output.non_tensor_batch["hint_level"]
-                level_candidate_counts = defaultdict(int)
-                level_success_counts = defaultdict(int)
-                for hint_reward, hint_level in zip(hint_reward_sums, hint_levels, strict=True):
-                    level = int(hint_level)
-                    level_candidate_counts[level] += 1
-                    if hint_reward > 0:
-                        level_success_counts[level] += 1
-
                 # 选择能做对题目的最低级hint
                 for uid in failed_uids:
                     candidate_indices = [i for i, hint_uid in enumerate(hint_uids) if hint_uid == uid]
@@ -1567,31 +1514,13 @@ class RayPPOTrainer:
                     fully_failed_uids.discard(uid)
 
                 selected_hint_levels = [hint_level for _, _, hint_level in hint_data_map.values()]
-                scaf_metrics.update(
-                    {
-                        "batch/scaf_hint_candidate_count": int(len(hint_reward_sums)),
-                        "batch/scaf_hint_candidate_success_rate": float(np.mean(hint_reward_sums > 0))
-                        if len(hint_reward_sums) > 0
-                        else 0.0,
-                        "batch/scaf_hint_solved_uid": len(hint_data_map),
-                        "batch/scaf_hint_uid_success_rate": len(hint_data_map) / max(len(failed_uids), 1),
-                        "batch/scaf_hint_selected_level_mean": _safe_mean(selected_hint_levels),
-                        "batch/scaf_hint_selected_level_min": _safe_min(selected_hint_levels),
-                        "batch/scaf_hint_selected_level_max": _safe_max(selected_hint_levels),
-                        "batch/scaf_hint_reward_after_hint_mean": _safe_mean(hint_reward_sums),
-                        "batch/scaf_hint_reward_after_hint_min": _safe_min(hint_reward_sums),
-                        "batch/scaf_hint_reward_after_hint_max": _safe_max(hint_reward_sums),
-                    }
-                )
-                for level in sorted(level_candidate_counts):
-                    candidate_count = level_candidate_counts[level]
-                    success_count = level_success_counts[level]
-                    scaf_metrics[f"batch/scaf_hint_level_{level}_candidate_count"] = candidate_count
-                    scaf_metrics[f"batch/scaf_hint_level_{level}_success_count"] = success_count
-                    scaf_metrics[f"batch/scaf_hint_level_{level}_success_rate"] = success_count / max(
-                        candidate_count, 1
+                rescued_uid_count = len(hint_data_map)
+                scaf_metrics["batch/scaf_hint_rescued_uid_count"] = rescued_uid_count
+                scaf_metrics["batch/scaf_hint_rescue_rate"] = rescued_uid_count / max(len(failed_uids), 1)
+                for level in range(1, self.hint_stage_count + 1):
+                    scaf_metrics[f"batch/scaf_selected_hint_level_{level}_uid_count"] = (
+                        selected_hint_levels.count(level)
                     )
-                    scaf_metrics[f"batch/scaf_hint_level_{level}_selected_uid"] = selected_hint_levels.count(level)
 
         # hint失败的构造专家轨迹
         expert_data_map = {}
@@ -1612,10 +1541,7 @@ class RayPPOTrainer:
                     expert_data_map[uid] = expert_data
 
         # 把hint引导轨迹/专家轨迹写回原batch
-        hint_replaced = 0 # 当前 batch 被 Hint response 替换的轨迹数量
-        expert_replaced = 0 # 被专家轨迹替换的轨迹数量
         replaced_indices = [] # 所有发生修改的 batch 行号
-        hint_replaced_indices = [] # 被 Hint 替换的 batch 行号，用于统计替换前后 reward
         per_uid_replaced = defaultdict(int) # 每个问题已经替换了多少条 rollout
 
         # Tensor keys needed when keeping the full hinted trajectory.
@@ -1654,9 +1580,7 @@ class RayPPOTrainer:
                 batch.batch["hint_sft_loss_mask"][row_idx] = batch.batch["response_mask"][row_idx]
                 batch.batch["sft_loss_mask"][row_idx].zero_() # 这两个是专家轨迹的处理
                 batch.batch["off_policy_mask"][row_idx].zero_()
-                hint_replaced += 1
                 replaced_indices.append(row_idx)
-                hint_replaced_indices.append(row_idx)
                 per_uid_replaced[uid] += 1
 
             # 替换专家轨迹
@@ -1668,12 +1592,9 @@ class RayPPOTrainer:
                     batch.batch[key][row_idx] = value.to(batch.batch[key].device)
 
                 batch.batch["hint_sft_loss_mask"][row_idx].zero_() # 清除掉hint轨迹的处理
-                expert_replaced += 1
                 replaced_indices.append(row_idx)
                 per_uid_replaced[uid] += 1
 
-        scaf_metrics["batch/scaf_hint_replaced"] = hint_replaced
-        scaf_metrics["batch/scaf_expert_replaced"] = expert_replaced
         metrics.update(scaf_metrics)
         if not replaced_indices:
             return batch, reward_tensor_first, reward_extra_infos_dict_first, False
@@ -1681,22 +1602,8 @@ class RayPPOTrainer:
         # 重新计算修改后的batch的reward
         reward_tensor_recomputed, reward_extra_infos_dict_recomputed = self._scaf_recompute_reward(batch)
         replaced_indices = sorted(set(replaced_indices))
-        hint_replaced_indices = sorted(set(hint_replaced_indices))
         reward_tensor_final = reward_tensor_first.clone() # 未被替换样本保留第一次reward
         reward_tensor_final[replaced_indices] = reward_tensor_recomputed[replaced_indices]
-
-        if hint_replaced_indices:
-            reward_recomputed_sums = reward_tensor_recomputed.sum(-1).detach().cpu().numpy()
-            hint_reward_before = [float(reward_sums[idx]) for idx in hint_replaced_indices]
-            hint_reward_after = [float(reward_recomputed_sums[idx]) for idx in hint_replaced_indices]
-            metrics.update(
-                {
-                    "batch/scaf_hint_reward_before_replace_mean": _safe_mean(hint_reward_before),
-                    "batch/scaf_hint_reward_after_replace_mean": _safe_mean(hint_reward_after),
-                    "batch/scaf_hint_reward_replace_delta_mean": _safe_mean(hint_reward_after)
-                    - _safe_mean(hint_reward_before),
-                }
-            )
 
         reward_extra_infos_dict = deepcopy(reward_extra_infos_dict_first)
         for key, recomputed_values in reward_extra_infos_dict_recomputed.items():
