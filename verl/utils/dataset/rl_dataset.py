@@ -62,6 +62,16 @@ def _normalize_scaf_expert_target(row_dict: dict):
             return
 
 
+def _normalize_scaf_hint_parts(value) -> list[str]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if not isinstance(value, (list, tuple, np.ndarray)):
+        value = [value]
+    return [str(part).strip() for part in value if str(part).strip()]
+
+
 def collate_fn(data_list: list[dict]) -> dict:
     """
     Collate a batch of sample dicts into batched tensors and arrays.
@@ -139,6 +149,12 @@ class RLHFDataset(Dataset):
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
+        # [ADD] Scaf-GRPO: optionally apply a fixed scaffold hint to every dataset prompt.
+        # This is separate from trainer.with_hint, which only runs second-stage hinted rollout
+        # for first-pass all-wrong groups.
+        self.scaf_fixed_hint_key = config.get("scaf_fixed_hint_key", None)
+        self.scaf_fixed_hint_count = int(config.get("scaf_fixed_hint_count", 0) or 0)
+        self.scaf_fixed_hint_label = config.get("scaf_fixed_hint_label", "Hints")
 
         self.tool_config_path = config.get("tool_config_path", None)
         self.tool_schemas = None
@@ -270,7 +286,11 @@ class RLHFDataset(Dataset):
                             apply_kwargs["tools"] = self.tool_schemas
 
                         return len(
-                            tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, **apply_kwargs)
+                            tokenizer.apply_chat_template(
+                                self._build_messages(doc),
+                                add_generation_prompt=True,
+                                **apply_kwargs,
+                            )
                         )
                     except Exception:
                         print("Error processing one of the samples, skipping...")
@@ -320,7 +340,7 @@ class RLHFDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[self.prompt_key]
+        messages: list = copy.deepcopy(example[self.prompt_key])
         images = example.pop(self.image_key, [])
         videos = example.pop(self.video_key, [])
 
@@ -357,7 +377,48 @@ class RLHFDataset(Dataset):
 
         assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
         assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
+        self._maybe_apply_scaf_fixed_hint(messages, example)
         return messages
+
+    def _maybe_apply_scaf_fixed_hint(self, messages: list, example: dict):
+        if not self.scaf_fixed_hint_key or self.scaf_fixed_hint_count <= 0:
+            return
+
+        parts = _normalize_scaf_hint_parts(example.get(self.scaf_fixed_hint_key))[: self.scaf_fixed_hint_count]
+        if not parts:
+            return
+
+        question = example.get("question")
+        if not isinstance(question, str) or not question.strip():
+            for message in reversed(messages):
+                if message.get("role") != "user":
+                    continue
+                content = message.get("content", "")
+                if isinstance(content, str):
+                    question = content
+                    break
+                if isinstance(content, list):
+                    question = " ".join(
+                        str(segment.get("text", "")).strip()
+                        for segment in content
+                        if isinstance(segment, dict) and segment.get("type") == "text"
+                    )
+                    break
+
+        hinted_content = (
+            f"Question: {str(question or '').strip()}\n"
+            f"{self.scaf_fixed_hint_label}: {' '.join(parts)}"
+        )
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            if isinstance(message.get("content"), list):
+                message["content"] = [{"type": "text", "text": hinted_content}]
+            else:
+                message["content"] = hinted_content
+            return
+
+        messages.append({"role": "user", "content": hinted_content})
 
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""

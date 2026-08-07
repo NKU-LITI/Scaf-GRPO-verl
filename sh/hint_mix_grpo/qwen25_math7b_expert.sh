@@ -12,7 +12,7 @@ export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_again}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_expert_again}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -89,8 +89,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \
     \
-    trainer.with_hint=True \
-    trainer.with_expert_fallback=False \
+    trainer.with_hint=False \
+    trainer.with_expert_fallback=True \
     trainer.hint_stage_count=3 \
     trainer.replace_hint_prompt_response=True \
     trainer.replace_num=1 \

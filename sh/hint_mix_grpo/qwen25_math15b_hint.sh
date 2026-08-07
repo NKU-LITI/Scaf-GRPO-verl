@@ -16,6 +16,7 @@ export VLLM_USE_V1=0
 PROJECT_NAME="scaf-grpo-baseline"
 EXP_NAME="outputs/qwen25_math15b_hint"
 MODEL_PATH="/workplace/nankai/liting_space/LLM/Qwen2.5-Math-1.5B"
+DATA_SEED="${DATA_SEED:-42}"
 
 
 mkdir -p ${EXP_NAME}
@@ -48,6 +49,8 @@ python3 -m verl.trainer.main_ppo \
     \
     data.train_files=${data_train_path} \
     data.val_files="${data_test_path}" \
+    data.shuffle=True \
+    data.seed="${DATA_SEED}" \
     data.train_batch_size=256 \
     data.val_batch_size=512 \
     data.max_prompt_length=4096 \
@@ -100,7 +103,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.with_hint=True \
     trainer.with_expert_fallback=False \
     trainer.hint_stage_count=3 \
-    trainer.replace_hint_prompt=False \
+    trainer.replace_hint_prompt_response=True \
     trainer.replace_num=1 \
     \
     actor_rollout_ref.actor.sft_loss_coef=0.0 \

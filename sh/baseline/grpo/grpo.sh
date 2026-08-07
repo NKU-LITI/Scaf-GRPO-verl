@@ -13,6 +13,7 @@ export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 PROJECT_NAME="${PROJECT_NAME:-scaf-grpo-expert-sft}"
 EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_grpo_baseline}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
+DATA_SEED="${DATA_SEED:-42}"
 
 mkdir -p "${EXP_NAME}"
 exec > >(tee -a "${EXP_NAME}/train.log") 2>&1
@@ -28,6 +29,8 @@ python3 -m verl.trainer.main_ppo \
     \
     data.train_files="${data_train_path}" \
     data.val_files="${data_val_path}" \
+    data.shuffle=True \
+    data.seed="${DATA_SEED}" \
     data.train_batch_size=64 \
     data.val_batch_size=64 \
     data.max_prompt_length=4096 \
@@ -84,7 +87,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.with_hint=False \
     trainer.with_expert_fallback=False \
     trainer.hint_stage_count=3 \
-    trainer.replace_hint_prompt=False \
+    trainer.replace_hint_prompt_response=True \
     trainer.replace_num=0 \
     trainer.expert_truncation=left \
     \

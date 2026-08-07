@@ -60,8 +60,7 @@ def build_hinted_gen_batch(base_batch: DataProto, stage_count: int = 3) -> DataP
     data_source_out = []
 
     for i in range(len(questions)):
-        hint_level = 1
-        for stage_key, hint_label in all_stages[:stage_count]:
+        for hint_stage, (stage_key, hint_label) in enumerate(all_stages[:stage_count], start=1):
             raw_parts = base_batch.non_tensor_batch.get(stage_key, [[] for _ in range(len(questions))])[i]
             if not isinstance(raw_parts, (list, tuple, np.ndarray)):
                 raw_parts = []
@@ -79,10 +78,9 @@ def build_hinted_gen_batch(base_batch: DataProto, stage_count: int = 3) -> DataP
                     ]
                 )
                 uids.append(original_uids[i])
-                hint_levels.append(hint_level)
+                hint_levels.append(hint_stage)
                 reward_model_out.append(reward_models[i])
                 data_source_out.append(data_sources[i])
-                hint_level += 1
 
     data = {
         "dummy_tensor": torch.zeros((len(raw_prompts), 1), dtype=torch.uint8),

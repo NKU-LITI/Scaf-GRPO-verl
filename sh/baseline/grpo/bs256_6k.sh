@@ -8,6 +8,7 @@ PROJECT_NAME='xxx'
 EXP_NAME='xxx'
 
 MODEL_PATH=xxx
+DATA_SEED="${DATA_SEED:-42}"
 
 
 # reward_tag=math-default
@@ -56,6 +57,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$data_train_path \
     data.val_files="$data_test_path" \
+    data.shuffle=True \
+    data.seed="${DATA_SEED}" \
     data.train_batch_size=${train_batchsize} \
     data.val_batch_size=${val_batchsize} \
     data.max_prompt_length=2048 \

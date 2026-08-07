@@ -361,7 +361,7 @@ class RayPPOTrainer:
         if self.hint_stage_count not in (1, 2, 3):
             raise ValueError(f"trainer.hint_stage_count must be 1, 2, or 3; got {self.hint_stage_count}.")
         self.with_expert_fallback = self.config.trainer.get("with_expert_fallback", False)
-        self.replace_hint_prompt = self.config.trainer.get("replace_hint_prompt", False)
+        self.replace_hint_prompt_response = self.config.trainer.get("replace_hint_prompt_response", True)
         self.replace_num = int(self.config.trainer.get("replace_num", 1))
         # [ADD] `apply_bypass_mode` mutates this config. Retain the configured loss mode so mutated Scaf-GRPO batches can safely recompute old log-probs.
         self._scaf_default_policy_loss_mode = self.config.actor_rollout_ref.actor.policy_loss.get(
@@ -1434,7 +1434,11 @@ class RayPPOTrainer:
                 batch.batch[mask_key] = torch.zeros_like(response_mask) # shape相同但是全零，后面发生替换后再置1
 
         # token-level reward聚合成traj-level，reward_tensor_first: [B × rollout.n, max_response_length],对最后一维求和
-        reward_sums = reward_tensor_first.sum(-1).detach().cpu().numpy() 
+        # reward_sums = reward_tensor_first.sum(-1).detach().cpu().numpy() 
+        reward_sums_tensor = reward_tensor_first.sum(dim=-1).float()
+        reward_sums = reward_sums_tensor.detach().cpu().numpy()
+        reward_before_mean = reward_sums_tensor.mean().item()
+
 
         uid_to_indices: dict[Any, list[int]] = defaultdict(list) # 根据uid把一道题的rollout分组
         for idx, uid in enumerate(batch.non_tensor_batch["uid"]):
@@ -1453,11 +1457,17 @@ class RayPPOTrainer:
             "batch/scaf_initial_failed_uid_count": len(failed_uids),
             "batch/scaf_hint_rescued_uid_count": 0,
             "batch/scaf_hint_rescue_rate": 0.0,
+            "batch/scaf_expert_injected_count": 0,
+            "batch/scaf_expert_solved_count": 0,
+            "batch/scaf_expert_success_rate": 0.0,
+            "batch/scaf_reward_before_mean": reward_before_mean,
+            "batch/scaf_reward_after_mean": reward_before_mean,
+            "batch/scaf_reward_gain": 0.0,
         }
-        # Mutually exclusive counts: each rescued UID is assigned to the lowest
-        # successful Hint level, matching the actual replacement rule below.
-        for level in range(1, self.hint_stage_count + 1):
-            scaf_metrics[f"batch/scaf_selected_hint_level_{level}_uid_count"] = 0
+        # Mutually exclusive counts: each rescued UID is assigned to the earliest
+        # successful hint stage, matching the actual replacement rule below.
+        for stage in range(1, self.hint_stage_count + 1):
+            scaf_metrics[f"batch/scaf_selected_hint_stage_{stage}_uid_count"] = 0
         if not failed_uids:
             metrics.update(scaf_metrics)
             return batch, reward_tensor_first, reward_extra_infos_dict_first, False
@@ -1466,7 +1476,7 @@ class RayPPOTrainer:
         base_indices = [indices[0] for uid, indices in uid_to_indices.items() if uid in failed_uids] 
         failed_base_batch = batch.select_idxs(base_indices)
 
-        hint_data_map = {} # 保存 Hint 成功的题目, (hinted_output, best_idx, hint_level,)
+        hint_data_map = {} # 保存 Hint 成功的题目, (hinted_output, best_idx, hint_stage,)
         fully_failed_uids = set(failed_uids) # 存储hint引导失败的题目，去做轨迹注入
 
         if hint_enabled and "question" in failed_base_batch.non_tensor_batch:
@@ -1503,7 +1513,7 @@ class RayPPOTrainer:
                 hint_reward_sums = reward_tensor_hint.sum(-1).detach().cpu().numpy()
                 hint_uids = hinted_output.non_tensor_batch["uid"]
                 hint_levels = hinted_output.non_tensor_batch["hint_level"]
-                # 选择能做对题目的最低级hint
+                # 选择能做对题目的最早hint阶段
                 for uid in failed_uids:
                     candidate_indices = [i for i, hint_uid in enumerate(hint_uids) if hint_uid == uid]
                     solved_indices = [i for i in candidate_indices if hint_reward_sums[i] > 0]
@@ -1513,13 +1523,13 @@ class RayPPOTrainer:
                     hint_data_map[uid] = (hinted_output, best_idx, int(hint_levels[best_idx]))
                     fully_failed_uids.discard(uid)
 
-                selected_hint_levels = [hint_level for _, _, hint_level in hint_data_map.values()]
+                selected_hint_stages = [hint_stage for _, _, hint_stage in hint_data_map.values()]
                 rescued_uid_count = len(hint_data_map)
                 scaf_metrics["batch/scaf_hint_rescued_uid_count"] = rescued_uid_count
                 scaf_metrics["batch/scaf_hint_rescue_rate"] = rescued_uid_count / max(len(failed_uids), 1)
-                for level in range(1, self.hint_stage_count + 1):
-                    scaf_metrics[f"batch/scaf_selected_hint_level_{level}_uid_count"] = (
-                        selected_hint_levels.count(level)
+                for stage in range(1, self.hint_stage_count + 1):
+                    scaf_metrics[f"batch/scaf_selected_hint_stage_{stage}_uid_count"] = (
+                        selected_hint_stages.count(stage)
                     )
 
         # hint失败的构造专家轨迹
@@ -1541,7 +1551,8 @@ class RayPPOTrainer:
                     expert_data_map[uid] = expert_data
 
         # 把hint引导轨迹/专家轨迹写回原batch
-        replaced_indices = [] # 所有发生修改的 batch 行号
+        replaced_indices = [] # 所有发生修改的 batch 行号（Hint + Expert）
+        expert_replaced_indices = [] # 只记录实际注入专家轨迹的 batch 行号
         per_uid_replaced = defaultdict(int) # 每个问题已经替换了多少条 rollout
 
         # Tensor keys needed when keeping the full hinted trajectory.
@@ -1558,7 +1569,10 @@ class RayPPOTrainer:
             # 替换Hint，有两种替换模式
             if uid in hint_data_map:
                 hinted_output, hint_idx, _ = hint_data_map[uid]
-                if self.replace_hint_prompt: # True, 只替换response
+                if self.replace_hint_prompt_response: # True, 替换prompt+response
+                    for key in tensor_keys:
+                        batch.batch[key][row_idx] = hinted_output.batch[key][hint_idx].to(batch.batch[key].device)
+                else: # False, 只替换response
                     response = hinted_output.batch["responses"][hint_idx].to(batch.batch["responses"].device)
                     response_mask_new = hinted_output.batch["response_mask"][hint_idx].to(
                         batch.batch["response_mask"].device
@@ -1574,9 +1588,7 @@ class RayPPOTrainer:
                         max=None,
                     )
                     batch.batch["response_mask"][row_idx] = response_mask_new
-                else: # False, 替换prompt+response
-                    for key in tensor_keys:
-                        batch.batch[key][row_idx] = hinted_output.batch[key][hint_idx].to(batch.batch[key].device)
+
                 batch.batch["hint_sft_loss_mask"][row_idx] = batch.batch["response_mask"][row_idx]
                 batch.batch["sft_loss_mask"][row_idx].zero_() # 这两个是专家轨迹的处理
                 batch.batch["off_policy_mask"][row_idx].zero_()
@@ -1593,6 +1605,7 @@ class RayPPOTrainer:
 
                 batch.batch["hint_sft_loss_mask"][row_idx].zero_() # 清除掉hint轨迹的处理
                 replaced_indices.append(row_idx)
+                expert_replaced_indices.append(row_idx)
                 per_uid_replaced[uid] += 1
 
         metrics.update(scaf_metrics)
@@ -1602,8 +1615,35 @@ class RayPPOTrainer:
         # 重新计算修改后的batch的reward
         reward_tensor_recomputed, reward_extra_infos_dict_recomputed = self._scaf_recompute_reward(batch)
         replaced_indices = sorted(set(replaced_indices))
+        expert_replaced_indices = sorted(set(expert_replaced_indices))
+
+        # 统计实际注入专家轨迹的数量，以及这些专家轨迹通过 reward verifier 的数量。
+        expert_injected_count = len(expert_replaced_indices)
+        if expert_injected_count > 0:
+            expert_reward_after = (
+                reward_tensor_recomputed[expert_replaced_indices]
+                .sum(dim=-1)
+                .float()
+            )
+            expert_solved_count = int((expert_reward_after > 0).sum().item())
+            expert_success_rate = expert_solved_count / expert_injected_count
+        else:
+            expert_solved_count = 0
+            expert_success_rate = 0.0
+
+        metrics["batch/scaf_expert_injected_count"] = expert_injected_count
+        metrics["batch/scaf_expert_solved_count"] = expert_solved_count
+        metrics["batch/scaf_expert_success_rate"] = expert_success_rate
+
         reward_tensor_final = reward_tensor_first.clone() # 未被替换样本保留第一次reward
         reward_tensor_final[replaced_indices] = reward_tensor_recomputed[replaced_indices]
+
+        # 统计整个 batch 的 reward 变化，而不是只统计必然为 0 的被替换失败轨迹。
+        reward_after_mean = reward_tensor_final.sum(dim=-1).float().mean().item()
+        metrics["batch/scaf_reward_before_mean"] = reward_before_mean
+        metrics["batch/scaf_reward_after_mean"] = reward_after_mean
+        metrics["batch/scaf_reward_gain"] = reward_after_mean - reward_before_mean
+
 
         reward_extra_infos_dict = deepcopy(reward_extra_infos_dict_first)
         for key, recomputed_values in reward_extra_infos_dict_recomputed.items():
@@ -1882,12 +1922,8 @@ class RayPPOTrainer:
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        # [DEL] Original path wrote reward_tensor here. Scaf-GRPO writes final token_level_scores before balancing so rewards and trajectories remain aligned after DataProto.reorder.
-                        # if self.config.reward_model.launch_reward_fn_async:
-                        #     reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        # batch.batch["token_level_scores"] = reward_tensor
                 
-                        # [ADD] token_level_scores has already been set to first-pass or Scaf-recomputed final rewards.
+                        # token_level_scores has already been set to first-pass or Scaf-recomputed final rewards.
                         assert "token_level_scores" in batch.batch, "Scaf-GRPO reward path must set token_level_scores"
 
                         # compute rewards. apply_kl_penalty if available

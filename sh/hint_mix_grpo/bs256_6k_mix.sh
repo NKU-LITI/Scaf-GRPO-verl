@@ -8,6 +8,7 @@ set -x
 PROJECT_NAME="${PROJECT_NAME:-scaf-grpo}"
 EXP_NAME="${EXP_NAME:-outputs/bs256_6k_mix}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the Hugging Face model directory}"
+DATA_SEED="${DATA_SEED:-42}"
 
 
 
@@ -59,6 +60,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$data_train_path \
     data.val_files="$data_test_path" \
+    data.shuffle=True \
+    data.seed="${DATA_SEED}" \
     data.train_batch_size=${train_batchsize} \
     data.val_batch_size=${val_batchsize} \
     data.max_prompt_length=4096 \
@@ -100,7 +103,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=${test_freq} \
     trainer.val_before_train=False \
     trainer.with_hint=True \
-    trainer.replace_hint_prompt=False \
+    trainer.replace_hint_prompt_response=True \
     trainer.replace_num=1 \
     trainer.rollout_data_dir="${EXP_NAME}/rollout_log/training" \
     trainer.validation_data_dir="${EXP_NAME}/rollout_log/validation" \

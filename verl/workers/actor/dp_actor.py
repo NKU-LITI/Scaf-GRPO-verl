@@ -454,6 +454,12 @@ class DataParallelPPOActor(BasePPOActor):
         # # [DEBUG] 第一次进入 actor update 时等待 VS Code Attach
         # self._maybe_wait_for_actor_debugger()
 
+        import os
+        print(
+            f"[DEBUG actor pid={os.getpid()}] enter update_policy",
+            flush=True
+        )
+
 
         # make sure we are in training mode
         self.actor_module.train()
@@ -476,9 +482,12 @@ class DataParallelPPOActor(BasePPOActor):
         if "rollout_is_weights" in data.batch.keys():
             select_keys.append("rollout_is_weights")
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
-        if "rollout_log_probs" in data.batch.keys():
+        if "rollout_log_probs" in data.batch.keys(): # 实际rollout的policy
             select_keys.append("rollout_log_probs")
-        # [ADD] Preserve Scaf-GRPO trajectory masks for expert/hint auxiliary losses.
+
+        # sft_loss_mask标识expert token是否参与sft loss
+        # hint_sft_loss_mask标识成功的hint rollout token
+        # off_policy_mask标识expert token是否使用off-policy rl loss
         for mask_key in ("sft_loss_mask", "hint_sft_loss_mask", "off_policy_mask"):
             if mask_key in data.batch.keys():
                 select_keys.append(mask_key)
@@ -492,7 +501,8 @@ class DataParallelPPOActor(BasePPOActor):
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
 
-        on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
+        on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1 # 目前设置Mini_batch=2
+
 
         metrics = {
             "actor/pg_loss": 0.0,
@@ -533,7 +543,7 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
 
-                    # all return: (bsz, response_length)
+                    # all return: (bsz, response_length)，这里调用actor
                     entropy, log_prob = self._forward_micro_batch(
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                     )

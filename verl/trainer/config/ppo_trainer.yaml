@@ -138,7 +138,7 @@ trainer:
   with_expert_fallback: false
 
   # [ADD] Scaf-GRPO: false keeps original prompt and only replaces response when hint succeeds.
-  replace_hint_prompt: false
+  replace_hint_prompt_response: true
 
   # [ADD] Scaf-GRPO: number of trajectories to replace per uid.
   replace_num: 1

@@ -61,8 +61,8 @@ return_full_prompt: False
 # Whether to shuffle the data in the dataloader.
 shuffle: True
 
-# Seed to use when shuffling the data
-seed: null
+# Seed to use when shuffling the data.
+seed: 42
 
 # num dataloader workers
 dataloader_num_workers: 8
@@ -129,3 +129,9 @@ datagen:
 
 # Additional kwargs when calling tokenizer.apply_chat_template
 apply_chat_template_kwargs: {}
+
+# [ADD] Scaf-GRPO: fixed scaffold hint applied to every prompt at dataset load time.
+# Example: planning_skeleton_parts + count 1 corresponds to Planning Hint level 1.
+scaf_fixed_hint_key: null
+scaf_fixed_hint_count: 0
+scaf_fixed_hint_label: Hints
