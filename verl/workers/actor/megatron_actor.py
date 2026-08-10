@@ -360,6 +360,8 @@ class MegatronPPOActor(BasePPOActor):
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
             select_keys.append("rollout_is_weights")
+        if "hint_is_weights" in data.batch.keys():
+            select_keys.append("hint_is_weights")
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
@@ -504,6 +506,7 @@ class MegatronPPOActor(BasePPOActor):
                 # Extract pre-computed rollout correction weights if present
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
+                hint_is_weights = data.get("hint_is_weights", None)
                 # [DEL] The native verl 0.7 branch ignored Scaf masks and
                 # always evaluated the standard registered policy loss.
                 # policy_loss_fn = get_policy_loss_fn(loss_mode)
@@ -519,6 +522,7 @@ class MegatronPPOActor(BasePPOActor):
                     hint_sft_loss_mask=hint_sft_loss_mask,
                     off_policy_mask=off_policy_mask,
                     rollout_is_weights=rollout_is_weights,
+                    hint_is_weights=hint_is_weights,
                 )
                 stats.update(pg_metrics)
 

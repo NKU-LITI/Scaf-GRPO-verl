@@ -135,3 +135,4 @@ apply_chat_template_kwargs: {}
 scaf_fixed_hint_key: null
 scaf_fixed_hint_count: 0
 scaf_fixed_hint_label: Hints
+scaf_fixed_hint_apply_to_val: False

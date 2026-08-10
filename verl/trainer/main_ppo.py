@@ -20,7 +20,7 @@ import socket
 
 import hydra
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
@@ -271,27 +271,27 @@ class TaskRunner:
         from verl.utils.fs import copy_to_local
 
 
-        # # ===== [DEBUG] =====
-        # import os
-        # import debugpy
+        # [DEBUG]
+        import os
+        import debugpy
 
-        # if os.environ.get("DEBUG_TASK_RUNNER", "0") == "1":
-        #     debug_port = 5678
+        if os.environ.get("DEBUG_TASK_RUNNER", "0") == "1":
+            debug_port = 5678
 
-        #     print(
-        #         f"[TaskRunner Debug] hostname={socket.gethostname()}, "
-        #         f"pid={os.getpid()}, port={debug_port}",
-        #         flush=True,
-        #     )
-        #     print(
-        #         "[TaskRunner Debug] waiting for VS Code debugger...",
-        #         flush=True,
-        #     )
+            print(
+                f"[TaskRunner Debug] hostname={socket.gethostname()}, "
+                f"pid={os.getpid()}, port={debug_port}",
+                flush=True,
+            )
+            print(
+                "[TaskRunner Debug] waiting for VS Code debugger...",
+                flush=True,
+            )
 
-        #     debugpy.listen(("127.0.0.1", debug_port))
-        #     debugpy.wait_for_client()
-        #     debugpy.breakpoint()
-        # # ===== 临时调试代码结束 =====
+            debugpy.listen(("127.0.0.1", debug_port))
+            debugpy.wait_for_client()
+            debugpy.breakpoint()
+        # ===== 临时调试代码结束 =====
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
@@ -403,12 +403,20 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
     # Get the dataset class
     dataset_cls = get_dataset_class(data_config)
 
+    dataset_config = data_config
+    if not is_train and not data_config.get("scaf_fixed_hint_apply_to_val", False):
+        dataset_config = OmegaConf.create(OmegaConf.to_container(data_config, resolve=False))
+        with open_dict(dataset_config):
+            dataset_config.scaf_fixed_hint_key = None
+            dataset_config.scaf_fixed_hint_count = 0
+            dataset_config.scaf_fixed_hint_label = data_config.get("scaf_fixed_hint_label", "Hints")
+
     # Instantiate the dataset using the determined dataset class
     dataset = dataset_cls(
         data_files=data_paths,
         tokenizer=tokenizer,
         processor=processor,
-        config=data_config,
+        config=dataset_config,
         max_samples=max_samples,
     )
 

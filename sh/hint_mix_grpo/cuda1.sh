@@ -5,15 +5,15 @@ set -euo pipefail
 
 source /home/liting/miniconda3/etc/profile.d/conda.sh
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_expert_again_again}"
-MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
+EXP_NAME="${EXP_NAME:-outputs/debug_occupy_1}"
+MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-1.5B}"
 DATA_SEED="${DATA_SEED:-42}"
 
 mkdir -p "${EXP_NAME}"
@@ -33,6 +33,8 @@ data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
 # epoch=2, step=24, warmup_steps内lr线性增加到设置的值
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
+    trainer.n_gpus_per_node=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     \
     data.train_files="${data_train_path}" \
     data.val_files="${data_val_path}" \
@@ -72,8 +74,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.25 \
     reward_model.use_reward_loop=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=-1 \
@@ -82,17 +83,18 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=0.0 \
     \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=2 \
-    trainer.total_epochs=5 \
-    trainer.save_freq=10 \
+    trainer.total_epochs=50 \
+    trainer.save_freq=20 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \
     \
-    trainer.with_hint=False \
-    trainer.with_expert_fallback=True \
+    trainer.with_hint=True \
+    trainer.with_expert_fallback=False \
     trainer.hint_stage_count=3 \
-    trainer.replace_hint_prompt_response=True \
+    trainer.replace_hint_prompt_response=False \
+    algorithm.hint_is_correction=False \
+    algorithm.hint_log_c_clip=5.0 \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
     \

@@ -1,22 +1,40 @@
 #!/usr/bin/env bash
 # [ADD] Migrated from Scaf-GRPO/sh; keep original experiment settings unless required by verl 0.7.
+
+# for npu, 设置 LD_LIBRARY_PATH 环境变量
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/hccl/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/fwkacllib/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/atc/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/compiler/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/aarch64-linux/lib64:$LD_LIBRARY_PATH
+
 set -x
 set -euo pipefail
 
-source /home/liting/miniconda3/etc/profile.d/conda.sh
+# source /home/liting/miniconda3/etc/profile.d/conda.sh
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+# export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+export CUDA_VISIBLE_DEVICES=""      # 禁用 CUDA
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
-export WANDB_MODE="${WANDB_MODE:-online}"
-export VLLM_USE_V1=1
+# export WANDB_MODE="${WANDB_MODE:-online}"
+export VLLM_USE_V1=1  # 0
+export VLLM_USE_NPU=1
+export RAY_USE_NPU=1
+# export ASCEND_RT_VISIBLE_DEVICES=0  # 如果多个NPU，用 0,1,2,...
+export DEVICE_TYPE="npu"
+export VLLM_DEVICE="npu"
+
+
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_expert_again_again}"
-MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
-DATA_SEED="${DATA_SEED:-42}"
+# EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_hint_npu}"
+EXP_NAME="/home/ma-user/modelarts/outputs/qwen25_math7b_hint_npu" # EXP_NAME 直接指向持久化挂载目录
+MODEL_PATH="${MODEL_PATH:-/home/ma-user/work/model_bucket/model}"
 
 mkdir -p "${EXP_NAME}"
+export TENSORBOARD_DIR="${EXP_NAME}/tensorboard"
+export VERL_FILE_LOGGER_PATH="${EXP_NAME}/metrics.jsonl"
 exec > >(tee -a "${EXP_NAME}/train.log") 2>&1
 
 printf '\n===== restart %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -31,13 +49,11 @@ data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
 
 
 # epoch=2, step=24, warmup_steps内lr线性增加到设置的值
-python3 -m verl.trainer.main_ppo \
+python3.10 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     \
     data.train_files="${data_train_path}" \
     data.val_files="${data_val_path}" \
-    data.shuffle=True \
-    data.seed="${DATA_SEED}" \
     data.train_batch_size=64 \
     data.val_batch_size=64 \
     data.max_prompt_length=4096 \
@@ -89,10 +105,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \
     \
-    trainer.with_hint=False \
-    trainer.with_expert_fallback=True \
+    trainer.with_hint=True \
+    trainer.with_expert_fallback=False \
     trainer.hint_stage_count=3 \
-    trainer.replace_hint_prompt_response=True \
+    trainer.replace_hint_prompt=True \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
     \
@@ -106,7 +122,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.validation_data_dir="${EXP_NAME}/rollout_log/validation" \
     trainer.default_local_dir="${EXP_NAME}/checkpoints" \
     \
-    trainer.logger="['console','wandb','file']" \
+    trainer.logger="['console','tensorboard','file']" \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name="${EXP_NAME}" \
     "$@"

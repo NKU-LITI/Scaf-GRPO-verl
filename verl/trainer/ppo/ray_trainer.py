@@ -67,6 +67,49 @@ from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
+def compute_hint_is_weights(
+    old_log_probs: torch.Tensor,
+    hint_behavior_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    hint_offpolicy_mask: torch.Tensor,
+    log_c_clip: float,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Compute detached sequence IS weights for response-only hinted trajectories."""
+    if log_c_clip <= 0:
+        raise ValueError(f"algorithm.hint_log_c_clip must be positive, got {log_c_clip}.")
+    if old_log_probs.shape != hint_behavior_log_probs.shape or old_log_probs.shape != response_mask.shape:
+        raise ValueError(
+            "old_log_probs, hint_behavior_log_probs, and response_mask must have identical shapes; "
+            f"got {old_log_probs.shape}, {hint_behavior_log_probs.shape}, and {response_mask.shape}."
+        )
+
+    trajectory_mask = hint_offpolicy_mask.to(device=old_log_probs.device, dtype=torch.bool).reshape(-1)
+    if trajectory_mask.shape[0] != old_log_probs.shape[0]:
+        raise ValueError(
+            f"hint_offpolicy_mask must have one value per trajectory; got {trajectory_mask.shape[0]} "
+            f"for batch size {old_log_probs.shape[0]}."
+        )
+
+    valid_tokens = response_mask.to(device=old_log_probs.device, dtype=torch.bool)
+    token_log_c = old_log_probs.detach() - hint_behavior_log_probs.detach()
+    log_c = torch.where(valid_tokens, token_log_c, torch.zeros_like(token_log_c)).sum(dim=-1)
+    log_c_used = torch.clamp(log_c, min=-log_c_clip, max=log_c_clip)
+    weights = torch.where(trajectory_mask, torch.exp(log_c_used), torch.ones_like(log_c_used)).detach()
+
+    selected_log_c = log_c[trajectory_mask]
+    selected_weights = weights[trajectory_mask]
+    metrics = {
+        "hint_is/log_c_mean": selected_log_c.mean().item(),
+        "hint_is/log_c_min": selected_log_c.min().item(),
+        "hint_is/log_c_max": selected_log_c.max().item(),
+        "hint_is/c_mean": selected_weights.mean().item(),
+        "hint_is/c_min": selected_weights.min().item(),
+        "hint_is/c_max": selected_weights.max().item(),
+        "hint_is/clip_frac": (selected_log_c.abs() > log_c_clip).float().mean().item(),
+    }
+    return weights.unsqueeze(-1), metrics
+
+
 @dataclass
 class ResourcePoolManager:
     """
@@ -480,6 +523,84 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    @staticmethod
+    def _normalize_difficulty(value) -> str:
+        value = str(value or "unknown").strip().lower()
+        if value == "medium":
+            return "medium"
+        if value in {"easy", "hard"}:
+            return value
+        return "unknown"
+
+    def _select_difficulty_samples(self, inputs, outputs, gts, scores, difficulties, uids=None):
+        """Select one easy, one medium, and one hard sample, preserving batch order."""
+        target_difficulties = ("hard", "medium", "easy")
+        selected = {}
+        n = min(len(inputs), len(outputs), len(gts), len(scores), len(difficulties))
+        uid_values = uids if uids is not None and len(uids) == n else [""] * n
+
+        for i in range(n):
+            difficulty = self._normalize_difficulty(difficulties[i])
+            if difficulty not in target_difficulties or difficulty in selected:
+                continue
+            selected[difficulty] = {
+                "step": self.global_steps,
+                "split": None,
+                "difficulty": difficulty,
+                "uid": str(uid_values[i]),
+                "input": inputs[i],
+                "output": outputs[i],
+                "score": scores[i],
+                "gt": gts[i],
+            }
+            if len(selected) == len(target_difficulties):
+                break
+
+        return [selected[difficulty] for difficulty in target_difficulties if difficulty in selected]
+
+    def _maybe_log_difficulty_samples_to_wandb(
+        self,
+        split: str,
+        inputs,
+        outputs,
+        gts,
+        scores,
+        difficulties,
+        uids=None,
+    ):
+        if "wandb" not in self.config.trainer.logger:
+            return
+
+        samples = self._select_difficulty_samples(
+            inputs=inputs,
+            outputs=outputs,
+            gts=gts,
+            scores=scores,
+            difficulties=difficulties,
+            uids=uids,
+        )
+        if not samples:
+            return
+
+        try:
+            import wandb
+        except ImportError:
+            return
+        if wandb.run is None:
+            return
+
+        columns = ["step", "split", "difficulty", "uid", "input", "output", "score", "gt"]
+        table_attr = f"_{split}_difficulty_generations_table"
+        old_table = getattr(self, table_attr, None)
+        table = wandb.Table(columns=columns, data=old_table.data if old_table is not None else [])
+
+        for sample in samples:
+            sample["split"] = split
+            table.add_data(*(sample[column] for column in columns))
+
+        setattr(self, table_attr, table)
+        wandb.log({f"{split}/difficulty_generations": table}, step=self.global_steps)
+
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
     ):
@@ -495,6 +616,12 @@ class RayPPOTrainer:
             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
+            difficulty_values = batch.non_tensor_batch.get("difficulty_bucket", ["unknown"] * len(batch))
+            difficulty_values = (
+                difficulty_values.tolist() if hasattr(difficulty_values, "tolist") else list(difficulty_values)
+            )
+            uid_values = batch.non_tensor_batch.get("uid", [""] * len(batch))
+            uid_values = uid_values.tolist() if hasattr(uid_values, "tolist") else list(uid_values)
 
             reward_extra_infos_to_dump = {}
             for key, values in reward_extra_infos_dict.items():
@@ -510,6 +637,8 @@ class RayPPOTrainer:
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
+            reward_extra_infos_to_dump["difficulty_bucket"] = difficulty_values
+            reward_extra_infos_to_dump["uid"] = uid_values
 
             self._dump_generations(
                 inputs=inputs,
@@ -518,6 +647,15 @@ class RayPPOTrainer:
                 scores=scores,
                 reward_extra_infos_dict=reward_extra_infos_to_dump,
                 dump_path=rollout_data_dir,
+            )
+            self._maybe_log_difficulty_samples_to_wandb(
+                split="train",
+                inputs=inputs,
+                outputs=outputs,
+                gts=sample_gts,
+                scores=scores,
+                difficulties=difficulty_values,
+                uids=uid_values,
             )
 
     @staticmethod
@@ -830,9 +968,18 @@ class RayPPOTrainer:
                 test_batch.non_tensor_batch.get("difficulty_bucket", ["unknown"] * reward_tensor.shape[0])
             )
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
         difficulty_buckets = np.concatenate(difficulty_bucket_lst, axis=0).astype(str)
         reward_extra_infos_dict["difficulty_bucket"] = difficulty_buckets.tolist()
+        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        self._maybe_log_difficulty_samples_to_wandb(
+            split="val",
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            gts=sample_gts,
+            scores=sample_scores,
+            difficulties=difficulty_buckets.tolist(),
+            uids=sample_uids,
+        )
 
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
@@ -1401,8 +1548,8 @@ class RayPPOTrainer:
         if "rm_scores" in batch.batch.keys():
             batch.batch.pop("rm_scores")
 
-        # 2. 如果启用了reward_model，rm给新轨迹重新打分。TODO: rm是始终启用吗
-        if self.use_rm:
+        # 2. 如果启用了learned reward model，rm给新轨迹重新打分
+        if self.use_rm: # false
             if not self.use_reward_loop:
                 rm_scores = self.rm_wg.compute_rm_score(batch)
             else:
@@ -1410,10 +1557,12 @@ class RayPPOTrainer:
                 rm_scores = self.reward_loop_manager.compute_rm_score(batch)
 
             batch = batch.union(rm_scores) # 把重新计算的奖励写回 batch
+        # rule-based走这里
         return self._compute_or_extract_reward(batch, reward_fn=self.reward_fn, return_dict=False)
 
 
     # [ADD] hint替换和专家轨迹注入，输入第一轮rollout后的batch,reward，输出替换后的batch,reward
+    # [ADD] 第二轮rollout，hint/expert替换，重算reward
     def _apply_scaf_grpo_interventions(
         self,
         batch: DataProto, # 第一轮rollout后完整batch，train_batch_size*rollout.n
@@ -1421,8 +1570,9 @@ class RayPPOTrainer:
         reward_extra_infos_dict_first: dict[str, Any], # 第一轮 reward 计算产生的额外信息如acc,pred,gt
         metrics: dict, # 当前step的日志dict，函数内会添加hint替换的指标
     ):
-        hint_enabled = self.with_hint # and self.global_steps > self.warmup_steps # TODO: 有必要考虑warmup_steps吗
+        hint_enabled = self.with_hint and self.global_steps >= self.warmup_steps
         expert_enabled = self.with_expert_fallback
+        hint_is_enabled = self.config.algorithm.get("hint_is_correction", False)
         if not hint_enabled and not expert_enabled:
             return batch, reward_tensor_first, reward_extra_infos_dict_first, False
         if self.config.reward_model.launch_reward_fn_async:
@@ -1434,22 +1584,21 @@ class RayPPOTrainer:
                 batch.batch[mask_key] = torch.zeros_like(response_mask) # shape相同但是全零，后面发生替换后再置1
 
         # token-level reward聚合成traj-level，reward_tensor_first: [B × rollout.n, max_response_length],对最后一维求和
-        # reward_sums = reward_tensor_first.sum(-1).detach().cpu().numpy() 
         reward_sums_tensor = reward_tensor_first.sum(dim=-1).float()
         reward_sums = reward_sums_tensor.detach().cpu().numpy()
         reward_before_mean = reward_sums_tensor.mean().item()
 
-
         uid_to_indices: dict[Any, list[int]] = defaultdict(list) # 根据uid把一道题的rollout分组
         for idx, uid in enumerate(batch.non_tensor_batch["uid"]):
-            uid_to_indices[uid].append(idx)
+            uid_to_indices[uid].append(idx)  # 当前题的N个轨迹下标
 
-        # 找出全错的题目
+        # 1. 找出全错的题目
         failed_uids = {
             uid
             for uid, indices in uid_to_indices.items()
             if len(indices) > 0 and np.all(reward_sums[indices] <= 0)
         }
+
         # Hint effectiveness is measured at UID/group level:
         # denominator = questions whose first rollout group has pass@k == 0;
         # numerator = those questions for which at least one hinted rollout is correct.
@@ -1480,20 +1629,18 @@ class RayPPOTrainer:
         fully_failed_uids = set(failed_uids) # 存储hint引导失败的题目，去做轨迹注入
 
         if hint_enabled and "question" in failed_base_batch.non_tensor_batch:
-            # 构造分层hint prompt, train_batch_size * 12(如果是三层Hint)
-            hinted_gen_batch = build_hinted_gen_batch(failed_base_batch, stage_count=self.hint_stage_count)
+            # 2. 构造分层hint prompt
+            hinted_gen_batch = build_hinted_gen_batch(failed_base_batch, stage_count=self.hint_stage_count) # train_batch_size * 12(如果是三层Hint)
 
             if len(hinted_gen_batch) > 0:
                 hinted_gen_batch.meta_info["global_steps"] = self.global_steps
 
                 # hint batch 需要padding，因为Hint candidate 数量不一定能整除 AgentLoop worker 数量，先复制补齐之后会删除复制的
-                agent_worker_count = int(
-                    self.config.actor_rollout_ref.rollout.get("agent", {}).get("num_workers", 1)
-                ) # 8，为什么是8
+                agent_worker_count = int(self.config.actor_rollout_ref.rollout.get("agent", {}).get("num_workers", 1)) # 8，为什么是8 
                 hinted_gen_batch_padded, hint_pad_size = pad_dataproto_to_divisor(
                     hinted_gen_batch, max(agent_worker_count, 1)
                 )
-                # 在hint引导下rollout
+                # 3. 在hint引导下rollout
                 hinted_output_padded = (
                     self.actor_rollout_wg.generate_sequences(hinted_gen_batch_padded)
                     if not self.async_rollout_mode
@@ -1508,7 +1655,7 @@ class RayPPOTrainer:
                 if "response_mask" not in hinted_output.batch.keys():
                     hinted_output.batch["response_mask"] = compute_response_mask(hinted_output)
 
-                # 给所有 Hint 引导生成的新轨迹重新打分
+                # 3.给所有 Hint 引导生成的新轨迹重新打分
                 reward_tensor_hint, _ = self._scaf_recompute_reward(hinted_output)
                 hint_reward_sums = reward_tensor_hint.sum(-1).detach().cpu().numpy()
                 hint_uids = hinted_output.non_tensor_batch["uid"]
@@ -1516,12 +1663,12 @@ class RayPPOTrainer:
                 # 选择能做对题目的最早hint阶段
                 for uid in failed_uids:
                     candidate_indices = [i for i, hint_uid in enumerate(hint_uids) if hint_uid == uid]
-                    solved_indices = [i for i in candidate_indices if hint_reward_sums[i] > 0]
+                    solved_indices = [i for i in candidate_indices if hint_reward_sums[i] > 0] # 只有做对的才会进入solved_indices
                     if not solved_indices:
                         continue
                     best_idx = min(solved_indices, key=lambda i: int(hint_levels[i]))
                     hint_data_map[uid] = (hinted_output, best_idx, int(hint_levels[best_idx]))
-                    fully_failed_uids.discard(uid)
+                    fully_failed_uids.discard(uid) 
 
                 selected_hint_stages = [hint_stage for _, _, hint_stage in hint_data_map.values()]
                 rescued_uid_count = len(hint_data_map)
@@ -1530,6 +1677,28 @@ class RayPPOTrainer:
                 for stage in range(1, self.hint_stage_count + 1):
                     scaf_metrics[f"batch/scaf_selected_hint_stage_{stage}_uid_count"] = (
                         selected_hint_stages.count(stage)
+                    )
+
+                # Keep the behavior probability under x+hint before response-only
+                # replacement rebuilds the sample with the original prompt x.
+                if hint_data_map and not self.replace_hint_prompt_response and hint_is_enabled:
+                    if "rollout_log_probs" in hinted_output.batch:
+                        hint_behavior_log_probs = hinted_output.batch["rollout_log_probs"].detach().float()
+                    else:
+                        hinted_old_log_prob_padded, _ = self._compute_old_log_prob(hinted_output_padded)
+                        hinted_old_log_prob = unpad_dataproto(
+                            hinted_old_log_prob_padded, pad_size=hint_pad_size
+                        )
+                        hint_behavior_log_probs = hinted_old_log_prob.batch["old_log_probs"].detach().float()
+                    if hint_behavior_log_probs.shape != hinted_output.batch["responses"].shape:
+                        raise ValueError(
+                            "Hint behavior log-probs must align with hinted responses; "
+                            f"got {hint_behavior_log_probs.shape} and {hinted_output.batch['responses'].shape}."
+                        )
+                    hinted_output.batch["hint_behavior_log_probs"] = hint_behavior_log_probs
+                    batch.batch["hint_behavior_log_probs"] = torch.zeros_like(response_mask, dtype=torch.float32)
+                    batch.batch["hint_offpolicy_mask"] = torch.zeros(
+                        len(batch), dtype=torch.bool, device=response_mask.device
                     )
 
         # hint失败的构造专家轨迹
@@ -1556,12 +1725,11 @@ class RayPPOTrainer:
         per_uid_replaced = defaultdict(int) # 每个问题已经替换了多少条 rollout
 
         # Tensor keys needed when keeping the full hinted trajectory.
-        # Match the original Scaf-GRPO semantics:
-        # replace_hint_prompt=True keeps the original prompt and swaps only response;
-        # replace_hint_prompt=False replaces prompt and response with hinted rollout.
+        # replace_hint_prompt_response=True replaces prompt and response;
+        # False keeps the original prompt and swaps only the response.
         tensor_keys = ["prompts", "responses", "input_ids", "attention_mask", "position_ids", "response_mask"]
 
-        for row_idx, uid in enumerate(batch.non_tensor_batch["uid"]):
+        for row_idx, uid in enumerate(batch.non_tensor_batch["uid"]): # 遍历整个batch
             # 每个问题最多被替换 replace_num 条
             if per_uid_replaced[uid] >= self.replace_num:
                 continue
@@ -1588,6 +1756,11 @@ class RayPPOTrainer:
                         max=None,
                     )
                     batch.batch["response_mask"][row_idx] = response_mask_new
+                    if hint_is_enabled:
+                        batch.batch["hint_behavior_log_probs"][row_idx] = hinted_output.batch[
+                            "hint_behavior_log_probs"
+                        ][hint_idx].to(batch.batch["hint_behavior_log_probs"].device)
+                        batch.batch["hint_offpolicy_mask"][row_idx] = True
 
                 batch.batch["hint_sft_loss_mask"][row_idx] = batch.batch["response_mask"][row_idx]
                 batch.batch["sft_loss_mask"][row_idx].zero_() # 这两个是专家轨迹的处理
@@ -1604,6 +1777,9 @@ class RayPPOTrainer:
                     batch.batch[key][row_idx] = value.to(batch.batch[key].device)
 
                 batch.batch["hint_sft_loss_mask"][row_idx].zero_() # 清除掉hint轨迹的处理
+                if "hint_behavior_log_probs" in batch.batch:
+                    batch.batch["hint_behavior_log_probs"][row_idx].zero_()
+                    batch.batch["hint_offpolicy_mask"][row_idx] = False
                 replaced_indices.append(row_idx)
                 expert_replaced_indices.append(row_idx)
                 per_uid_replaced[uid] += 1
@@ -1676,6 +1852,8 @@ class RayPPOTrainer:
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        if self.config.trainer.get("val_only", False) and self.config.trainer.get("val_only_step", None) is not None:
+            self.global_steps = int(self.config.trainer.val_only_step)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -1722,29 +1900,26 @@ class RayPPOTrainer:
                         if self.config.global_profiler.profile_continuous_steps
                         else curr_step_profile
                     )
+
+                # 1. 构建训练数据
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-
-                # add uid to batch，为原始题目创建唯一ID
-                batch.non_tensor_batch["uid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
-                )
-
-                gen_batch = self._get_gen_batch(batch) # rollout不能看到hint/expert信息
-
-                # pass global_steps to trace
+                # 为每个原始题目创建唯一uid
+                batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
+                # 去掉rollout不能看到的hint/expert信息
+                gen_batch = self._get_gen_batch(batch) 
                 gen_batch.meta_info["global_steps"] = self.global_steps
-                gen_batch_output = gen_batch.repeat( # gen_batch复制8份
-                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                )
+                # 每个问题复制8次，B->B*N
+                gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True) # interleave=True让相同uid的N个副本相邻
+
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
-                    # generate a batch，进行rollout
+                    # 2. 第一轮rollout
                     with marked_timer("gen", timing_raw, color="red"):
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
-                        else: # 走这里
+                        else: # 第一轮rollout，走这里
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output) # driver进程调用入口
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
@@ -1802,7 +1977,7 @@ class RayPPOTrainer:
                     #
                     # batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-                    # 计算reward
+                    # 3. 第一轮计算reward
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # For rule-based math reward, score on the trainer side so training matches validation.
                         # Agent-loop rm_scores can be present when reward_model.use_reward_loop=True, but those
@@ -1837,7 +2012,7 @@ class RayPPOTrainer:
                     scaf_interventions_applied = False # hint干预状态，当前batch是否有轨迹被替换了，确实改写了batch.batch["responses"]才会返回True
                     if self.with_hint or self.with_expert_fallback:
                         batch, reward_tensor, scaf_reward_extra_infos_dict, scaf_interventions_applied = (
-                            self._apply_scaf_grpo_interventions( # ********************************
+                            self._apply_scaf_grpo_interventions( 
                                 batch, reward_tensor, reward_extra_infos_dict, metrics
                             )
                         )
@@ -1906,6 +2081,27 @@ class RayPPOTrainer:
                                 metrics.update(calculate_debug_metrics(batch))
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+
+                    hint_is_enabled = self.config.algorithm.get("hint_is_correction", True)
+                    hint_offpolicy_mask = batch.batch.get("hint_offpolicy_mask", None)
+                    if (
+                        hint_is_enabled
+                        and hint_offpolicy_mask is not None
+                        and torch.any(hint_offpolicy_mask.to(torch.bool))
+                    ):
+                        if "hint_behavior_log_probs" not in batch.batch:
+                            raise ValueError(
+                                "Response-only Hint IS correction requires hint_behavior_log_probs."
+                            )
+                        hint_is_weights, hint_is_metrics = compute_hint_is_weights(
+                            old_log_probs=batch.batch["old_log_probs"],
+                            hint_behavior_log_probs=batch.batch["hint_behavior_log_probs"],
+                            response_mask=batch.batch["response_mask"],
+                            hint_offpolicy_mask=hint_offpolicy_mask,
+                            log_c_clip=float(self.config.algorithm.get("hint_log_c_clip", 5.0)),
+                        )
+                        batch.batch["hint_is_weights"] = hint_is_weights
+                        metrics.update(hint_is_metrics)
 
                     if self.use_reference_policy:
                         # compute reference log_prob

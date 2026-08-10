@@ -99,48 +99,48 @@ class DataParallelPPOActor(BasePPOActor):
 
 
 
-    # # [DEBUG] Attach debugger to rank-0 actor worker.
-    # def _maybe_wait_for_actor_debugger(self):
-    #     if os.environ.get("DEBUG_ACTOR_WORKER", "0") != "1":
-    #         return
+    # [DEBUG] Attach debugger to rank-0 actor worker.
+    def _maybe_wait_for_actor_debugger(self):
+        if os.environ.get("DEBUG_ACTOR_WORKER", "0") != "1":
+            return
 
-    #     # 每个 Actor Worker 只执行一次
-    #     if getattr(self, "_actor_debugger_initialized", False):
-    #         return
+        # 每个 Actor Worker 只执行一次
+        if getattr(self, "_actor_debugger_initialized", False):
+            return
 
-    #     if torch.distributed.is_available() and torch.distributed.is_initialized():
-    #         rank = torch.distributed.get_rank()
-    #     else:
-    #         rank = int(os.environ.get("RANK", "0"))
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = int(os.environ.get("RANK", "0"))
 
-    #     # 多卡时只有 rank 0 监听端口，否则多个进程会争用同一个端口
-    #     if rank != 0:
-    #         self._actor_debugger_initialized = True
-    #         return
+        # 多卡时只有 rank 0 监听端口，否则多个进程会争用同一个端口
+        if rank != 0:
+            self._actor_debugger_initialized = True
+            return
 
-    #     self._actor_debugger_initialized = True
+        self._actor_debugger_initialized = True
 
-    #     import debugpy
+        import debugpy
 
-    #     host = os.environ.get("DEBUG_ACTOR_HOST", "127.0.0.1")
-    #     port = int(os.environ.get("DEBUG_ACTOR_PORT", "5681"))
+        host = os.environ.get("DEBUG_ACTOR_HOST", "127.0.0.1")
+        port = int(os.environ.get("DEBUG_ACTOR_PORT", "5681"))
 
-    #     debugpy.listen((host, port))
-    #     print(
-    #         f"[Actor Debug] pid={os.getpid()}, rank={rank}, "
-    #         f"waiting for debugger at {host}:{port}",
-    #         flush=True,
-    #     )
+        debugpy.listen((host, port))
+        print(
+            f"[Actor Debug] pid={os.getpid()}, rank={rank}, "
+            f"waiting for debugger at {host}:{port}",
+            flush=True,
+        )
 
-    #     debugpy.wait_for_client()
+        debugpy.wait_for_client()
 
-    #     print(
-    #         f"[Actor Debug] debugger attached, pid={os.getpid()}, rank={rank}",
-    #         flush=True,
-    #     )
+        print(
+            f"[Actor Debug] debugger attached, pid={os.getpid()}, rank={rank}",
+            flush=True,
+        )
 
-    #     # Attach 成功后主动暂停一次
-    #     debugpy.breakpoint()
+        # Attach 成功后主动暂停一次
+        debugpy.breakpoint()
 
 
 
@@ -451,8 +451,8 @@ class DataParallelPPOActor(BasePPOActor):
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
 
-        # # [DEBUG] 第一次进入 actor update 时等待 VS Code Attach
-        # self._maybe_wait_for_actor_debugger()
+        # [DEBUG] 第一次进入 actor update 时等待 VS Code Attach
+        self._maybe_wait_for_actor_debugger()
 
         import os
         print(
@@ -481,6 +481,8 @@ class DataParallelPPOActor(BasePPOActor):
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
             select_keys.append("rollout_is_weights")
+        if "hint_is_weights" in data.batch.keys():
+            select_keys.append("hint_is_weights")
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys(): # 实际rollout的policy
             select_keys.append("rollout_log_probs")
@@ -510,11 +512,11 @@ class DataParallelPPOActor(BasePPOActor):
         }
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
-                if self.config.use_dynamic_bsz:
+                if self.config.use_dynamic_bsz: # TODO: 默认是false，目前没使用这个参数
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
-                else:
-                    self.gradient_accumulation = (
+                else: 
+                    self.gradient_accumulation = ( # 256/2 = 128
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                     )
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
@@ -543,10 +545,11 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
 
-                    # all return: (bsz, response_length)，这里调用actor
+                    # 计算new_log_prob. all return: (bsz, response_length)，这里调用actor
                     entropy, log_prob = self._forward_micro_batch(
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
-                    )
+                    ) # model_inputs: ['responses', 'response_mask', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages', 'sft_loss_mask', 'hint_sft_loss_mask', 'off_policy_mask', 'multi_modal_inputs']
+                      # len(model_inputs["inputs_ids"]) = 2, len(log_prob) = 2
 
                     # for fully_async_policy recipe
                     if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
@@ -562,6 +565,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # Extract pre-computed rollout correction weights if present Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
+                    hint_is_weights = model_inputs.get("hint_is_weights", None)
 
                     # [DEL] The native verl 0.7 branch ignored Scaf masks and always evaluated the standard registered policy loss.
                     # policy_loss_fn = get_policy_loss_fn(loss_mode)
@@ -577,6 +581,7 @@ class DataParallelPPOActor(BasePPOActor):
                         hint_sft_loss_mask=hint_sft_loss_mask,
                         off_policy_mask=off_policy_mask,
                         rollout_is_weights=rollout_is_weights,
+                        hint_is_weights=hint_is_weights,
                     )
                     micro_batch_metrics.update(pg_metrics)
 

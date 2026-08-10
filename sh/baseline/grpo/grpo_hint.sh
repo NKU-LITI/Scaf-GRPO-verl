@@ -42,6 +42,12 @@ EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_grpo_hint}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
+if [[ -d "${EXP_NAME}" ]] && [[ -n "$(find "${EXP_NAME}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "ERROR: EXP_NAME output directory already exists and is not empty: ${EXP_NAME}" >&2
+    echo "Set a new EXP_NAME to avoid overwriting or appending to a previous run." >&2
+    exit 1
+fi
+
 mkdir -p "${EXP_NAME}"
 exec > >(tee -a "${EXP_NAME}/train.log") 2>&1
 
@@ -51,6 +57,8 @@ data_dir="${DATA_DIR:-data/DeepScaler/Qwen2d5_math_7b}"
 data_train_path="${DATA_TRAIN_PATH:-${data_dir}/train_800.success_rate_k8.parquet}"
 data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
 
+
+# add scaf_fixed_hint_key 控制是否给所有prompt添加hint
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     \
@@ -64,6 +72,9 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation=error \
     data.max_response_length=2048 \
+    data.scaf_fixed_hint_key=planning_skeleton_parts \
+    data.scaf_fixed_hint_count=1 \
+    data.scaf_fixed_hint_label="Planning Hints" \
     \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \

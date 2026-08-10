@@ -481,6 +481,9 @@ class AlgoConfig(BaseConfig):
 
             For backward compatibility, you can still pass a dict, which will be converted to
             RolloutCorrectionConfig automatically.
+        hint_is_correction (bool): Apply trajectory-level context-shift importance sampling to
+            hinted responses generated with a hint but trained with the original prompt.
+        hint_log_c_clip (float): Symmetric clipping bound for the hinted trajectory log weight.
     """
 
     gamma: float = 1.0
@@ -496,3 +499,5 @@ class AlgoConfig(BaseConfig):
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None
+    hint_is_correction: bool = True
+    hint_log_c_clip: float = 5.0

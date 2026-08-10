@@ -11,7 +11,7 @@ export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 
 PROJECT_NAME="${PROJECT_NAME:-scaf-grpo-expert-sft}"
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_grpo_baseline}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_grpo_baseline_test_time}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -78,7 +78,7 @@ python3 -m verl.trainer.main_ppo \
     \
     trainer.nnodes=1 \
     trainer.n_gpus_per_node=2 \
-    trainer.total_epochs=5 \
+    trainer.total_epochs=10 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
@@ -88,6 +88,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.with_expert_fallback=False \
     trainer.hint_stage_count=3 \
     trainer.replace_hint_prompt_response=True \
+    algorithm.hint_is_correction=False \
+    algorithm.hint_log_c_clip=5.0 \
     trainer.replace_num=0 \
     trainer.expert_truncation=left \
     \

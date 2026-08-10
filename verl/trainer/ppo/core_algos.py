@@ -903,6 +903,7 @@ def compute_policy_loss(
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
+# [LOC] on-policy rl loss 实现, [policy_loss_fn] 的原始实现
 @register_policy_loss("vanilla")  # type: ignore[arg-type]
 def compute_policy_loss_vanilla(
     old_log_prob: torch.Tensor,
@@ -1551,12 +1552,16 @@ def compute_token_on_off_policy_loss(
     response_mask: torch.Tensor,
     off_policy_mask: torch.Tensor,
     cliprange: float,
+    cliprange_low: float | None = None,
+    cliprange_high: float | None = None,
+    clip_ratio_c: float = 3.0,
     clip_upper_bound: float = 1.0,
     off_policy_reshape: str = "p_div_p_0.1",
     off_policy_max_clip: float | None = None,
     off_policy_min_clip: float | None = None,
     loss_agg_mode: str = "token-mean",
     global_batch_info: Optional[dict[str, Any]] = None,
+    rollout_is_weights: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     response_mask = response_mask.to(bool)
     off_policy_mask = (off_policy_mask.to(bool)) & response_mask
@@ -1565,19 +1570,41 @@ def compute_token_on_off_policy_loss(
     negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
 
-    on_pg_losses1 = -advantages * ratio
+    cliprange_low = cliprange if cliprange_low is None else cliprange_low
+    cliprange_high = cliprange if cliprange_high is None else cliprange_high
+    if clip_ratio_c <= 1.0:
+        raise ValueError(f"clip_ratio_c must be greater than 1.0, got {clip_ratio_c}.")
 
-    # Match the original Scaf-GRPO PPO branch while permitting a larger explicitly configured cap.
-    on_pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange, max(1 + cliprange, clip_upper_bound))
-    on_pg_losses = torch.maximum(on_pg_losses1, on_pg_losses2)
+    # Keep ordinary rollout tokens identical to verl's vanilla PPO objective even
+    # when an expert token happens to share the same micro-batch.
+    on_pg_losses1 = -advantages * ratio
+    on_pg_losses2 = -advantages * torch.clamp(
+        ratio,
+        1 - cliprange_low,
+        max(1 + cliprange_high, clip_upper_bound),
+    )
+    on_pg_losses_clipped = torch.maximum(on_pg_losses1, on_pg_losses2)
+    on_pg_losses3 = -advantages * clip_ratio_c
+    on_pg_losses = torch.where(
+        advantages < 0,
+        torch.minimum(on_pg_losses3, on_pg_losses_clipped),
+        on_pg_losses_clipped,
+    )
+    if rollout_is_weights is not None:
+        on_pg_losses = on_pg_losses * rollout_is_weights
 
     def safe_masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # A micro-batch can contain no expert or no on-policy tokens. Keep the unused branch finite and differentiably zero.
+        # A micro-batch can contain no expert or no on-policy tokens.
+        # Keep the unused branch finite and differentiably zero.
         if not torch.any(mask):
             return values.sum() * 0.0
         return verl_F.masked_mean(values, mask)
 
     on_pg_clipfrac = safe_masked_mean(torch.gt(on_pg_losses2, on_pg_losses1).float(), on_policy_mask)
+    on_pg_clipfrac_lower = safe_masked_mean(
+        torch.gt(on_pg_losses_clipped, on_pg_losses3).float() * (advantages < 0).float(),
+        on_policy_mask,
+    )
 
     prob = torch.exp(log_prob)
     
@@ -1611,10 +1638,11 @@ def compute_token_on_off_policy_loss(
     off_ratio_mean = safe_masked_mean(off_ratio, off_policy_mask)
 
     return {
-        "pg_loss": pg_loss,
+        "pg_loss": pg_loss, # 最后的loss
         "on_pg_loss": on_pg_loss.detach().item(),
         "off_pg_loss": off_pg_loss.detach().item(),
         "on_pg_clipfrac": on_pg_clipfrac.detach().item(),
+        "on_pg_clipfrac_lower": on_pg_clipfrac_lower.detach().item(),
         "ppo_kl": ppo_kl.detach().item(),
         "off_policy_prob": off_policy_prob.detach().item(),
         "off_ratio_mean": off_ratio_mean.detach().item(),

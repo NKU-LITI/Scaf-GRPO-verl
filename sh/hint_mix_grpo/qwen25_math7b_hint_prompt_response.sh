@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# [ADD] Migrated from Scaf-GRPO/sh; keep original experiment settings unless required by verl 0.7.
+
 set -x
 set -euo pipefail
 
 source /home/liting/miniconda3/etc/profile.d/conda.sh
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
+# export WANDB_RUN_ID="${WANDB_RUN_ID:-9xbabglh}" # 从之前的wandb接着训练
+# export WANDB_RESUME="${WANDB_RESUME:-allow}" # 从之前的wandb接着训练
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_again}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_replace_prompt_response}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -33,6 +35,8 @@ data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
 # epoch=2, step=24, warmup_steps内lr线性增加到设置的值
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
+    trainer.n_gpus_per_node=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     \
     data.train_files="${data_train_path}" \
     data.val_files="${data_val_path}" \
@@ -73,7 +77,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     reward_model.use_reward_loop=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=-1 \
@@ -82,8 +85,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=0.0 \
     \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=2 \
-    trainer.total_epochs=5 \
+    trainer.total_epochs=10 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
@@ -92,7 +94,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.with_hint=True \
     trainer.with_expert_fallback=False \
     trainer.hint_stage_count=3 \
-    trainer.replace_hint_prompt_response=True \
+    trainer.replace_hint_prompt_response=False \
+    algorithm.hint_is_correction=True \
+    algorithm.hint_log_c_clip=5.0 \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
     \

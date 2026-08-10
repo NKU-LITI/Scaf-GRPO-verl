@@ -552,6 +552,8 @@ algorithm:
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: true
+  hint_is_correction: true
+  hint_log_c_clip: 5.0
   use_kl_in_reward: false
   kl_penalty: kl
   kl_ctrl:
