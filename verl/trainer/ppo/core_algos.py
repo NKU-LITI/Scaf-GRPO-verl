@@ -1562,10 +1562,20 @@ def compute_token_on_off_policy_loss(
     loss_agg_mode: str = "token-mean",
     global_batch_info: Optional[dict[str, Any]] = None,
     rollout_is_weights: torch.Tensor | None = None,
+    off_policy_loss_type: str = "probability",
+    loss_remove_clip: bool = False,             # ADD
+    loss_remove_token_mean: bool = False,       # ADD
 ) -> dict[str, Any]:
     response_mask = response_mask.to(bool)
     off_policy_mask = (off_policy_mask.to(bool)) & response_mask
     on_policy_mask = response_mask & (~off_policy_mask)
+
+    def safe_masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # A micro-batch can contain no expert or no on-policy tokens.
+        # Keep the unused branch finite and differentiably zero.
+        if not torch.any(mask):
+            return values.sum() * 0.0
+        return verl_F.masked_mean(values, mask)
 
     negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
@@ -1578,59 +1588,81 @@ def compute_token_on_off_policy_loss(
     # Keep ordinary rollout tokens identical to verl's vanilla PPO objective even
     # when an expert token happens to share the same micro-batch.
     on_pg_losses1 = -advantages * ratio
-    on_pg_losses2 = -advantages * torch.clamp(
-        ratio,
-        1 - cliprange_low,
-        max(1 + cliprange_high, clip_upper_bound),
-    )
-    on_pg_losses_clipped = torch.maximum(on_pg_losses1, on_pg_losses2)
-    on_pg_losses3 = -advantages * clip_ratio_c
-    on_pg_losses = torch.where(
-        advantages < 0,
-        torch.minimum(on_pg_losses3, on_pg_losses_clipped),
-        on_pg_losses_clipped,
-    )
-    if rollout_is_weights is not None:
-        on_pg_losses = on_pg_losses * rollout_is_weights
+    if loss_remove_clip:
+        # L_on = - A * pi_theta / pi_old
+        on_pg_losses = on_pg_losses1
 
-    def safe_masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # A micro-batch can contain no expert or no on-policy tokens.
-        # Keep the unused branch finite and differentiably zero.
-        if not torch.any(mask):
-            return values.sum() * 0.0
-        return verl_F.masked_mean(values, mask)
+        zero = log_prob.sum() * 0.0
+        on_pg_clipfrac = zero
+        on_pg_clipfrac_lower = zero
+    else:
+        on_pg_losses2 = -advantages * torch.clamp(
+            ratio,
+            1 - cliprange_low,
+            max(1 + cliprange_high, clip_upper_bound),
+        )
+        on_pg_losses_clipped = torch.maximum(on_pg_losses1, on_pg_losses2)
+        on_pg_losses3 = -advantages * clip_ratio_c
+        on_pg_losses = torch.where(
+            advantages < 0,
+            torch.minimum(on_pg_losses3, on_pg_losses_clipped),
+            on_pg_losses_clipped,
+        )
+        if rollout_is_weights is not None:
+            on_pg_losses = on_pg_losses * rollout_is_weights
 
-    on_pg_clipfrac = safe_masked_mean(torch.gt(on_pg_losses2, on_pg_losses1).float(), on_policy_mask)
-    on_pg_clipfrac_lower = safe_masked_mean(
-        torch.gt(on_pg_losses_clipped, on_pg_losses3).float() * (advantages < 0).float(),
-        on_policy_mask,
-    )
+
+        on_pg_clipfrac = safe_masked_mean(torch.gt(on_pg_losses2, on_pg_losses1).float(), on_policy_mask)
+        on_pg_clipfrac_lower = safe_masked_mean(
+            torch.gt(on_pg_losses_clipped, on_pg_losses3).float() * (advantages < 0).float(),
+            on_policy_mask,
+        )
 
     prob = torch.exp(log_prob)
     
-    # Restore the bounded probability reshaping used for expert tokens.
-    if off_policy_reshape == "p_div_p_0.1":
-        off_ratio = prob / (prob + 0.1)
-    elif off_policy_reshape == "p_div_p_0.3":
-        off_ratio = prob / (prob + 0.3)
-    elif off_policy_reshape == "p_div_p_0.5":
-        off_ratio = prob / (prob + 0.5)
-    elif off_policy_reshape in ("p", "no_reshape"):
-        off_ratio = prob
-    elif off_policy_reshape in ("square_root", "pow"):
-        off_ratio = torch.sqrt(prob)
+    if off_policy_loss_type == "advantage_weighted_log_prob":
+        # Expert trajectories have no known behavior-policy probability. Use
+        # reward/advantage-weighted log-likelihood so low-probability expert
+        # tokens retain a non-vanishing gradient: dL/dlog(pi) = -A.
+        off_pg_losses = -advantages * log_prob
+        off_ratio = torch.ones_like(log_prob)
+    elif off_policy_loss_type == "probability":
+        # Bounded probability objective retained for backward compatibility.
+        if off_policy_reshape == "p_div_p_0.1":
+            off_ratio = prob / (prob + 0.1)
+        elif off_policy_reshape == "p_div_p_0.3":
+            off_ratio = prob / (prob + 0.3)
+        elif off_policy_reshape == "p_div_p_0.5":
+            off_ratio = prob / (prob + 0.5)
+        elif off_policy_reshape in ("p", "no_reshape"):
+            off_ratio = prob
+        elif off_policy_reshape in ("square_root", "pow"):
+            off_ratio = torch.sqrt(prob)
+        else:
+            raise ValueError(f"Unsupported off_policy_reshape: {off_policy_reshape}")
+
+        if off_policy_max_clip is not None:
+            off_ratio = torch.clamp(off_ratio, max=off_policy_max_clip)
+        if off_policy_min_clip is not None:
+            off_ratio = torch.clamp(off_ratio, min=off_policy_min_clip)
+
+        off_pg_losses = -advantages * off_ratio
     else:
-        raise ValueError(f"Unsupported off_policy_reshape: {off_policy_reshape}")
+        raise ValueError(
+            "off_policy_loss_type must be 'probability' or 'advantage_weighted_log_prob'; "
+            f"got {off_policy_loss_type!r}."
+        )
 
-    if off_policy_max_clip is not None:
-        off_ratio = torch.clamp(off_ratio, max=off_policy_max_clip)
-    if off_policy_min_clip is not None:
-        off_ratio = torch.clamp(off_ratio, min=off_policy_min_clip)
-
-    off_pg_losses = -advantages * off_ratio
     pg_losses = torch.where(off_policy_mask, off_pg_losses, on_pg_losses)
-    global_batch_info = global_batch_info or {}
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **global_batch_info)
+    if loss_remove_token_mean:
+        pg_loss = (pg_losses * response_mask.to(pg_losses.dtype)).sum() / (
+            response_mask.shape[0] * response_mask.shape[-1]
+        )
+    else:
+        global_batch_info = global_batch_info or {}
+        pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **global_batch_info)
+
+
     on_pg_loss = safe_masked_mean(on_pg_losses, on_policy_mask)
     off_pg_loss = safe_masked_mean(off_pg_losses, off_policy_mask)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)

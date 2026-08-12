@@ -1,24 +1,46 @@
 #!/usr/bin/env bash
+# [ADD] Migrated from Scaf-GRPO/sh; keep original experiment settings unless required by verl 0.7.
+
+# for npu, 设置 LD_LIBRARY_PATH 环境变量
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/hccl/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/fwkacllib/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/atc/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/compiler/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.3.RC1/aarch64-linux/lib64:$LD_LIBRARY_PATH
 
 set -x
 set -euo pipefail
 
-source /home/liting/miniconda3/etc/profile.d/conda.sh
+# source /home/liting/miniconda3/etc/profile.d/conda.sh
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+# export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+export CUDA_VISIBLE_DEVICES=""      # 禁用 CUDA
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
-export WANDB_MODE="${WANDB_MODE:-online}"
-# export WANDB_RUN_ID="${WANDB_RUN_ID:-9xbabglh}" # 从之前的wandb接着训练
-# export WANDB_RESUME="${WANDB_RESUME:-allow}" # 从之前的wandb接着训练
-export VLLM_USE_V1=1
+# export WANDB_MODE="${WANDB_MODE:-online}"
+export VLLM_USE_V1=1  # 0
+export VLLM_USE_NPU=1
+export RAY_USE_NPU=1
+# export ASCEND_RT_VISIBLE_DEVICES=0  # 如果多个NPU，用 0,1,2,...
+export DEVICE_TYPE="npu"
+export VLLM_DEVICE="npu"
+
+export OUTPUT_PATH # ADD "/home/ma-user/modelarts/outputs/output_path_0/"
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_replace_prompt_response}"
-MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
-DATA_SEED="${DATA_SEED:-42}"
+MODEL_PATH="${MODEL_PATH:-/home/ma-user/work/model_bucket/model}"
+
+# EXP_NAME="/home/ma-user/modelarts/outputs/output_path_0/qwen25_math7b_expert_npu" # EXP_NAME 直接指向持久化挂载目录
+EXP_NAME="${OUTPUT_PATH}/qwen25_math7b_expert_npu"
+echo "========================================="
+echo "实验配置："
+echo "  EXP_NAME: $EXP_NAME"
+echo "  模型路径: ${MODEL_PATH:-/home/ma-user/work/model_bucket/model}"
+echo "========================================="
 
 mkdir -p "${EXP_NAME}"
+export TENSORBOARD_DIR="${EXP_NAME}/tensorboard" # ADD tensorboard
+export VERL_FILE_LOGGER_PATH="${EXP_NAME}/metrics.jsonl" # ADD tensorboard
 exec > >(tee -a "${EXP_NAME}/train.log") 2>&1
 
 printf '\n===== restart %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -30,7 +52,7 @@ prompt_tag="system-p1"
 data_dir="${DATA_DIR:-data/DeepScaler/Qwen2d5_math_7b}"
 data_train_path="${DATA_TRAIN_PATH:-${data_dir}/train_800.success_rate_k8.parquet}"
 data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
-
+DATA_SEED="${DATA_SEED:-42}"
 
 # epoch=2, step=24, warmup_steps内lr线性增加到设置的值
 python3 -m verl.trainer.main_ppo \
@@ -85,18 +107,16 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=0.0 \
     \
     trainer.nnodes=1 \
-    trainer.total_epochs=10 \
+    trainer.total_epochs=5 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \
     \
-    trainer.with_hint=True \
-    trainer.with_expert_fallback=False \
+    trainer.with_hint=False \
+    trainer.with_expert_fallback=True \
     trainer.hint_stage_count=3 \
     trainer.replace_hint_prompt_response=True \
-    algorithm.hint_is_correction=False \
-    algorithm.hint_log_c_clip=5.0 \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
     \
@@ -110,7 +130,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.validation_data_dir="${EXP_NAME}/rollout_log/validation" \
     trainer.default_local_dir="${EXP_NAME}/checkpoints" \
     \
-    trainer.logger="['console','wandb','file']" \
+    trainer.logger="['console','wandb','file','tensorboard']" \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name="${EXP_NAME}" \
     "$@"

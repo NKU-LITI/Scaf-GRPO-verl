@@ -569,6 +569,8 @@ class MegatronPPOActor(BasePPOActor):
                     metrics["actor/kl_loss"] = kl_loss.detach().item()
                     metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
+                stats["actor/total_loss"] = policy_loss.detach().item()
+
                 # return loss and stats
 
             append_to_dict(metrics, stats)

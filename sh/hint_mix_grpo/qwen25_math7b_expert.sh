@@ -1,18 +1,42 @@
 #!/usr/bin/env bash
-# [ADD] Migrated from Scaf-GRPO/sh; keep original experiment settings unless required by verl 0.7.
+
+# TARGET_PIDS=(848894 848895)
+
+# echo "正在监测 PID: ${TARGET_PIDS[*]}，等待其全部结束..."
+
+# while true; do
+#     alive=0
+#     for pid in "${TARGET_PIDS[@]}"; do
+#         if kill -0 "$pid" 2>/dev/null; then
+#             alive=1
+#             break
+#         fi
+#     done
+
+#     if [ "$alive" -eq 0 ]; then
+#         break
+#     fi
+
+#     sleep 30
+# done
+
+# echo "所有目标 PID 已结束，开始执行新的训练程序..."
+# echo "---------------------------------------------------"
+
+
 set -x
 set -euo pipefail
 
 source /home/liting/miniconda3/etc/profile.d/conda.sh
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_expert_again_again}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_expert_weight_adv}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -83,8 +107,8 @@ python3 -m verl.trainer.main_ppo \
     \
     trainer.nnodes=1 \
     trainer.n_gpus_per_node=2 \
-    trainer.total_epochs=5 \
-    trainer.save_freq=10 \
+    trainer.total_epochs=10 \
+    trainer.save_freq=20 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \
@@ -96,7 +120,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
     \
-    actor_rollout_ref.actor.use_off_policy_loss=False \
+    actor_rollout_ref.actor.use_off_policy_loss=True \
+    actor_rollout_ref.actor.off_policy_loss_type=advantage_weighted_log_prob \
     actor_rollout_ref.actor.off_policy_reshape=p_div_p_0.1 \
     actor_rollout_ref.actor.sft_loss_coef=0.0 \
     actor_rollout_ref.actor.use_hint_sft_loss=False \
@@ -109,7 +134,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger="['console','wandb','file']" \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name="${EXP_NAME}" \
+    \
+    algorithm.norm_adv_by_std_in_grpo=False \
+    actor_rollout_ref.actor.loss_remove_clip=True \
+    actor_rollout_ref.actor.loss_remove_token_mean=True \
     "$@"
 
-
+    # algorithm.norm_adv_by_std_in_grpo=False \ # add as luffy，去掉grpo std，默认为true
     # actor_rollout_ref.rollout.max_model_len=12288 \

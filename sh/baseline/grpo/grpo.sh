@@ -1,4 +1,29 @@
 #!/usr/bin/env bash
+
+# TARGET_PIDS=(3729692 3729693)
+
+# echo "正在监测 PID: ${TARGET_PIDS[*]}，等待其全部结束..."
+
+# while true; do
+#     alive=0
+#     for pid in "${TARGET_PIDS[@]}"; do
+#         if kill -0 "$pid" 2>/dev/null; then
+#             alive=1
+#             break
+#         fi
+#     done
+
+#     if [ "$alive" -eq 0 ]; then
+#         break
+#     fi
+
+#     sleep 30
+# done
+
+# echo "所有目标 PID 已结束，开始执行新的训练程序..."
+# echo "---------------------------------------------------"
+
+
 set -x
 set -euo pipefail
 
@@ -10,8 +35,11 @@ export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 
+export WANDB_RUN_ID="${WANDB_RUN_ID:-y52m6blw}" # 从之前的wandb接着训练
+export WANDB_RESUME="${WANDB_RESUME:-allow}" # 从之前的wandb接着训练
+
 PROJECT_NAME="${PROJECT_NAME:-scaf-grpo-expert-sft}"
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_grpo_baseline_test_time}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_grpo_baseline}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -26,6 +54,7 @@ data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
+    trainer.resume_mode=auto \
     \
     data.train_files="${data_train_path}" \
     data.val_files="${data_val_path}" \

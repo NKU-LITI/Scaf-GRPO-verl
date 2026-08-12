@@ -25,16 +25,25 @@ export RAY_USE_NPU=1
 export DEVICE_TYPE="npu"
 export VLLM_DEVICE="npu"
 
+export OUTPUT_PATH # ADD "/home/ma-user/modelarts/outputs/output_path_0/"
 
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-# EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_hint_npu}"
-EXP_NAME="/home/ma-user/modelarts/outputs/qwen25_math7b_hint_npu" # EXP_NAME 直接指向持久化挂载目录
 MODEL_PATH="${MODEL_PATH:-/home/ma-user/work/model_bucket/model}"
 
+# EXP_NAME="/home/ma-user/modelarts/outputs/output_path_0/qwen25_math7b_hint_npu" # EXP_NAME 直接指向持久化挂载目录
+EXP_NAME="${OUTPUT_PATH}/qwen25_math7b_hint_npu"
+echo "========================================="
+echo "实验配置："
+echo "  EXP_NAME: $EXP_NAME"
+echo "  模型路径: ${MODEL_PATH:-/home/ma-user/work/model_bucket/model}"
+echo "========================================="
+
+
+
 mkdir -p "${EXP_NAME}"
-export TENSORBOARD_DIR="${EXP_NAME}/tensorboard"
-export VERL_FILE_LOGGER_PATH="${EXP_NAME}/metrics.jsonl"
+export TENSORBOARD_DIR="${EXP_NAME}/tensorboard" # ADD tensorboard
+export VERL_FILE_LOGGER_PATH="${EXP_NAME}/metrics.jsonl" # ADD tensorboard
 exec > >(tee -a "${EXP_NAME}/train.log") 2>&1
 
 printf '\n===== restart %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -46,14 +55,18 @@ prompt_tag="system-p1"
 data_dir="${DATA_DIR:-data/DeepScaler/Qwen2d5_math_7b}"
 data_train_path="${DATA_TRAIN_PATH:-${data_dir}/train_800.success_rate_k8.parquet}"
 data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
-
+DATA_SEED="${DATA_SEED:-42}"
 
 # epoch=2, step=24, warmup_steps内lr线性增加到设置的值
-python3.10 -m verl.trainer.main_ppo \
+python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
+    trainer.n_gpus_per_node=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     \
     data.train_files="${data_train_path}" \
     data.val_files="${data_val_path}" \
+    data.shuffle=True \
+    data.seed="${DATA_SEED}" \
     data.train_batch_size=64 \
     data.val_batch_size=64 \
     data.max_prompt_length=4096 \
@@ -89,7 +102,6 @@ python3.10 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     reward_model.use_reward_loop=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=-1 \
@@ -98,8 +110,7 @@ python3.10 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=0.0 \
     \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=2 \
-    trainer.total_epochs=5 \
+    trainer.total_epochs=10 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
@@ -108,7 +119,9 @@ python3.10 -m verl.trainer.main_ppo \
     trainer.with_hint=True \
     trainer.with_expert_fallback=False \
     trainer.hint_stage_count=3 \
-    trainer.replace_hint_prompt=True \
+    trainer.replace_hint_prompt_response=False \
+    algorithm.hint_is_correction=True \
+    algorithm.hint_log_c_clip=5.0 \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
     \
@@ -122,7 +135,7 @@ python3.10 -m verl.trainer.main_ppo \
     trainer.validation_data_dir="${EXP_NAME}/rollout_log/validation" \
     trainer.default_local_dir="${EXP_NAME}/checkpoints" \
     \
-    trainer.logger="['console','tensorboard','file']" \
+    trainer.logger="['console','wandb','file','tensorboard']" \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name="${EXP_NAME}" \
     "$@"

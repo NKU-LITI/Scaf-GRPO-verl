@@ -44,7 +44,7 @@ from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
 
 # [ADD] Use the Scaf-aware objective in verl 0.7's default legacy actor path.
-from verl.workers.utils.losses import compute_scaf_ppo_policy_loss
+from verl.workers.utils.losses import compute_scaf_ppo_policy_loss, compute_scaf_source_policy_losses
 
 __all__ = ["DataParallelPPOActor"]
 
@@ -96,6 +96,28 @@ class DataParallelPPOActor(BasePPOActor):
             self.scaler = ShardedGradScaler(growth_interval=400)
         else:
             self.scaler = None
+
+    def _compute_scaf_source_grad_norms(
+        self,
+        source_losses: dict[str, torch.Tensor],
+        log_prob: torch.Tensor,
+    ) -> dict[str, float]:
+        """Measure each source's loss gradient with respect to token log probabilities.
+
+        FSDP with ``use_orig_params=False`` runs the forward pass through temporary
+        unsharded parameter views. Calling ``autograd.grad`` on the registered flat
+        parameters therefore reports them as unused and silently produces zero. The
+        log-probability gradient is the source-specific signal entering the model
+        backward pass and is independent of the FSDP parameter representation.
+        """
+        metrics = {}
+        for source, source_loss in source_losses.items():
+            grad = torch.autograd.grad(source_loss, log_prob, retain_graph=True)[0]
+            grad_sq_sum = torch.sum(grad.detach().float().square())
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(grad_sq_sum, op=torch.distributed.ReduceOp.SUM)
+            metrics[f"actor/source_grad_norm/{source}"] = torch.sqrt(grad_sq_sum).detach().item()
+        return metrics
 
 
 
@@ -618,6 +640,24 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    micro_batch_metrics["actor/total_loss"] = policy_loss.detach().item()
+                    source_losses = compute_scaf_source_policy_losses(
+                        config=self.config,
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        sft_loss_mask=sft_loss_mask,
+                        hint_sft_loss_mask=hint_sft_loss_mask,
+                        off_policy_mask=off_policy_mask,
+                        rollout_is_weights=rollout_is_weights,
+                        hint_is_weights=hint_is_weights,
+                    )
+                    source_losses = {
+                        source: source_loss * loss_scale_factor for source, source_loss in source_losses.items()
+                    }
+                    micro_batch_metrics.update(self._compute_scaf_source_grad_norms(source_losses, log_prob))
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz

@@ -143,6 +143,12 @@ class ActorConfig(BaseConfig):
     clip_ratio_c: float = 3.0
     loss_agg_mode: str = "token-mean"
     loss_scale_factor: Optional[int] = None
+
+    # [ADD] LUFFY: remove PPO clipping from on-policy policy-gradient loss.
+    loss_remove_clip: bool = False
+    # [ADD] LUFFY: normalize summed policy loss by fixed response length instead of the number of valid response tokens.
+    loss_remove_token_mean: bool = False
+
     entropy_coeff: float = 0
     # [ADD] Scaf-GRPO: auxiliary SFT/NLL loss weight for directly injected expert trajectories.
     sft_loss_coef: float = 0.0
@@ -152,6 +158,8 @@ class ActorConfig(BaseConfig):
     hint_sft_loss_coef: float = 0.0
     # [ADD] Scaf-GRPO: enable token-level off-policy RL loss on directly injected expert tokens.
     use_off_policy_loss: bool = False
+    # [ADD] Scaf-GRPO: expert objective: probability (legacy) or advantage_weighted_log_prob.
+    off_policy_loss_type: str = "probability"
     # [ADD] Scaf-GRPO: probability reshape used by expert off-policy token weighting.
     off_policy_reshape: str = "p_div_p_0.1"
     # [ADD] Scaf-GRPO: optional upper clipping bound for expert off-policy token weighting; negative disables.

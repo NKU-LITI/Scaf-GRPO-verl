@@ -111,7 +111,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=10 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.warmup_steps=5 \
     \
     trainer.with_hint=True \

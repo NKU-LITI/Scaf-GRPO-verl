@@ -93,7 +93,7 @@ def compute_hint_is_weights(
     valid_tokens = response_mask.to(device=old_log_probs.device, dtype=torch.bool)
     token_log_c = old_log_probs.detach() - hint_behavior_log_probs.detach()
     log_c = torch.where(valid_tokens, token_log_c, torch.zeros_like(token_log_c)).sum(dim=-1)
-    log_c_used = torch.clamp(log_c, min=-log_c_clip, max=log_c_clip)
+    log_c_used = torch.clamp(log_c, min=-log_c_clip, max=log_c_clip) # log_c_clip=5，Cy=[old_policy(y|x)/old_policy(y|x_h)]都在这里clip掉了，测试样例Cy=-109
     weights = torch.where(trajectory_mask, torch.exp(log_c_used), torch.ones_like(log_c_used)).detach()
 
     selected_log_c = log_c[trajectory_mask]
@@ -1570,7 +1570,7 @@ class RayPPOTrainer:
         reward_extra_infos_dict_first: dict[str, Any], # 第一轮 reward 计算产生的额外信息如acc,pred,gt
         metrics: dict, # 当前step的日志dict，函数内会添加hint替换的指标
     ):
-        hint_enabled = self.with_hint and self.global_steps >= self.warmup_steps
+        hint_enabled = self.with_hint and self.global_steps > self.warmup_steps
         expert_enabled = self.with_expert_fallback
         hint_is_enabled = self.config.algorithm.get("hint_is_correction", False)
         if not hint_enabled and not expert_enabled:

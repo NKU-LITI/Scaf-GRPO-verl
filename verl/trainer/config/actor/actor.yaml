@@ -100,6 +100,9 @@ hint_sft_loss_coef: 0.0
 # [ADD] Scaf-GRPO: apply token-level off-policy loss to directly injected expert trajectories.
 use_off_policy_loss: false
 
+# [ADD] Scaf-GRPO: expert objective: probability (legacy) or advantage_weighted_log_prob.
+off_policy_loss_type: probability
+
 # [ADD] Scaf-GRPO: probability reshape used when expert behavior-policy probabilities are unavailable.
 off_policy_reshape: p_div_p_0.1
 
@@ -111,6 +114,12 @@ off_policy_min_clip: -1.0
 
 # [ADD] Scaf-GRPO: upper PPO ratio bound used by mixed on/off-policy loss on-policy branch.
 clip_upper_bound: 1.0
+
+# LUFFY: remove PPO clipping for on-policy tokens
+loss_remove_clip: false
+
+# LUFFY: divide summed PG loss by fixed response length instead of valid-token count
+loss_remove_token_mean: false
 
 # When true, the actor forward will request entropy from the model
 calculate_entropy: false

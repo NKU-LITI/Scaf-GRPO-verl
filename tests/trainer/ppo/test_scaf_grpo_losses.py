@@ -25,6 +25,7 @@ def _actor_config(loss_mode: str = "vanilla"):
             "clip_upper_bound": 1.0,
             "global_batch_info": {},
             "use_off_policy_loss": True,
+            "off_policy_loss_type": "probability",
             "off_policy_reshape": "p_div_p_0.1",
             "off_policy_max_clip": -1.0,
             "off_policy_min_clip": -1.0,
@@ -85,6 +86,45 @@ def test_expert_mixed_loss_rejects_non_vanilla_policy_mode():
             response_mask=torch.ones_like(values, dtype=torch.bool),
             off_policy_mask=torch.ones_like(values, dtype=torch.bool),
         )
+
+
+def test_expert_advantage_weighted_log_prob_has_nonvanishing_gradient():
+    log_prob = torch.tensor([[-20.0, -2.0]], requires_grad=True)
+    config = _actor_config()
+    result = compute_token_on_off_policy_loss(
+        old_log_prob=log_prob.detach(),
+        log_prob=log_prob,
+        advantages=torch.ones_like(log_prob),
+        response_mask=torch.ones_like(log_prob, dtype=torch.bool),
+        off_policy_mask=torch.ones_like(log_prob, dtype=torch.bool),
+        cliprange=config.clip_ratio,
+        off_policy_loss_type="advantage_weighted_log_prob",
+    )
+
+    grad = torch.autograd.grad(result["pg_loss"], log_prob)[0]
+    assert result["pg_loss"].item() == pytest.approx(11.0)
+    torch.testing.assert_close(grad, torch.full_like(grad, -0.5))
+    assert result["off_ratio_mean"] == pytest.approx(1.0)
+
+
+def test_fixed_length_loss_is_invariant_to_micro_batch_duplication():
+    config = _actor_config()
+
+    def compute(batch_size):
+        log_prob = torch.full((batch_size, 2), -2.0)
+        return compute_token_on_off_policy_loss(
+            old_log_prob=log_prob,
+            log_prob=log_prob,
+            advantages=torch.ones_like(log_prob),
+            response_mask=torch.ones_like(log_prob, dtype=torch.bool),
+            off_policy_mask=torch.ones_like(log_prob, dtype=torch.bool),
+            cliprange=config.clip_ratio,
+            off_policy_loss_type="advantage_weighted_log_prob",
+            loss_remove_token_mean=True,
+        )["pg_loss"]
+
+    assert compute(1).item() == pytest.approx(2.0)
+    assert compute(2).item() == pytest.approx(2.0)
 
 
 def test_expert_sft_loss_only_uses_marked_response_tokens():

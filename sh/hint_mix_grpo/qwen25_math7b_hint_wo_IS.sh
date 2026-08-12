@@ -1,5 +1,30 @@
 #!/usr/bin/env bash
-# [ADD] Migrated from Scaf-GRPO/sh; keep original experiment settings unless required by verl 0.7.
+
+
+TARGET_PIDS=(3208102 3208103)
+
+echo "正在监测 PID: ${TARGET_PIDS[*]}，等待其全部结束..."
+
+while true; do
+    alive=0
+    for pid in "${TARGET_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            alive=1
+            break
+        fi
+    done
+
+    if [ "$alive" -eq 0 ]; then
+        break
+    fi
+
+    sleep 30
+done
+
+echo "所有目标 PID 已结束，开始执行新的训练程序..."
+echo "---------------------------------------------------"
+
+
 set -x
 set -euo pipefail
 
@@ -84,7 +109,7 @@ python3 -m verl.trainer.main_ppo \
     \
     trainer.nnodes=1 \
     trainer.total_epochs=10 \
-    trainer.save_freq=10 \
+    trainer.save_freq=20 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \

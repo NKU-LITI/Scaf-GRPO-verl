@@ -30,6 +30,156 @@ from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
 
 
+def _scaf_zero_like_loss(log_prob: torch.Tensor) -> torch.Tensor:
+    return log_prob.sum() * 0.0
+
+
+def _scaf_bool_mask(mask: torch.Tensor | None, response_mask: torch.Tensor) -> torch.Tensor:
+    if mask is None:
+        return torch.zeros_like(response_mask, dtype=torch.bool)
+    return mask.to(device=response_mask.device, dtype=torch.bool) & response_mask
+
+
+def compute_scaf_source_policy_losses(
+    config,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    sft_loss_mask: torch.Tensor | None = None,
+    hint_sft_loss_mask: torch.Tensor | None = None,
+    off_policy_mask: torch.Tensor | None = None,
+    rollout_is_weights: torch.Tensor | None = None,
+    hint_is_weights: torch.Tensor | None = None,
+):
+    """Return Scaf policy-loss pieces by trajectory source for gradient diagnostics."""
+    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+    if loss_mode != "vanilla":
+        zero = _scaf_zero_like_loss(log_prob)
+        return {
+            "rollout": zero,
+            "expert": zero,
+            "hint": zero,
+        }
+
+    response_mask = response_mask.to(bool)
+    expert_mask = _scaf_bool_mask(off_policy_mask, response_mask) | _scaf_bool_mask(sft_loss_mask, response_mask)
+    hint_mask = _scaf_bool_mask(hint_sft_loss_mask, response_mask) & (~expert_mask)
+    rollout_mask = response_mask & (~expert_mask) & (~hint_mask)
+
+    if hint_is_weights is not None:
+        advantages = advantages * hint_is_weights.detach()
+
+    negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+
+    use_mixed_loss = config.get("use_off_policy_loss", False) and off_policy_mask is not None
+    if use_mixed_loss:
+        cliprange_low = config.clip_ratio if config.clip_ratio_low is None else config.clip_ratio_low
+        cliprange_high = config.clip_ratio if config.clip_ratio_high is None else config.clip_ratio_high
+        clip_ratio_c = config.get("clip_ratio_c", 3.0)
+        clip_upper_bound = config.get("clip_upper_bound", 1.0)
+
+        on_pg_losses = -advantages * ratio
+        if not config.get("loss_remove_clip", False):
+            on_pg_losses2 = -advantages * torch.clamp(
+                ratio,
+                1 - cliprange_low,
+                max(1 + cliprange_high, clip_upper_bound),
+            )
+            on_pg_losses_clipped = torch.maximum(on_pg_losses, on_pg_losses2)
+            on_pg_losses3 = -advantages * clip_ratio_c
+            on_pg_losses = torch.where(
+                advantages < 0,
+                torch.minimum(on_pg_losses3, on_pg_losses_clipped),
+                on_pg_losses_clipped,
+            )
+            if rollout_is_weights is not None:
+                on_pg_losses = on_pg_losses * rollout_is_weights
+
+        actual_off_policy_mask = _scaf_bool_mask(off_policy_mask, response_mask)
+        off_policy_loss_type = config.get("off_policy_loss_type", "probability")
+        if off_policy_loss_type == "advantage_weighted_log_prob":
+            off_pg_losses = -advantages * log_prob
+        elif off_policy_loss_type == "probability":
+            prob = torch.exp(log_prob)
+            off_policy_reshape = config.get("off_policy_reshape", "p_div_p_0.1")
+            if off_policy_reshape == "p_div_p_0.1":
+                off_ratio = prob / (prob + 0.1)
+            elif off_policy_reshape == "p_div_p_0.3":
+                off_ratio = prob / (prob + 0.3)
+            elif off_policy_reshape == "p_div_p_0.5":
+                off_ratio = prob / (prob + 0.5)
+            elif off_policy_reshape in ("p", "no_reshape"):
+                off_ratio = prob
+            elif off_policy_reshape in ("square_root", "pow"):
+                off_ratio = torch.sqrt(prob)
+            else:
+                raise ValueError(f"Unsupported off_policy_reshape: {off_policy_reshape}")
+
+            off_policy_max_clip = config.get("off_policy_max_clip", -1.0)
+            off_policy_min_clip = config.get("off_policy_min_clip", -1.0)
+            if off_policy_max_clip >= 0:
+                off_ratio = torch.clamp(off_ratio, max=off_policy_max_clip)
+            if off_policy_min_clip >= 0:
+                off_ratio = torch.clamp(off_ratio, min=off_policy_min_clip)
+            off_pg_losses = -advantages * off_ratio
+        else:
+            raise ValueError(
+                "off_policy_loss_type must be 'probability' or 'advantage_weighted_log_prob'; "
+                f"got {off_policy_loss_type!r}."
+            )
+        pg_losses = torch.where(actual_off_policy_mask, off_pg_losses, on_pg_losses)
+    else:
+        clip_ratio = config.clip_ratio
+        clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
+        clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
+        clip_ratio_c = config.get("clip_ratio_c", 3.0)
+
+        pg_losses1 = -advantages * ratio
+        pg_losses2 = -advantages * torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+        clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+        pg_losses3 = -advantages * clip_ratio_c
+        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+        pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+        if rollout_is_weights is not None:
+            pg_losses = pg_losses * rollout_is_weights
+
+    def aggregate_source(mask: torch.Tensor) -> torch.Tensor:
+        if not torch.any(mask):
+            return _scaf_zero_like_loss(log_prob)
+        if use_mixed_loss and config.get("loss_remove_token_mean", False):
+            return (pg_losses * mask.to(pg_losses.dtype)).sum() / (
+                response_mask.shape[0] * response_mask.shape[-1]
+            )
+        global_batch_info = getattr(config, "global_batch_info", {})
+        return agg_loss(
+            loss_mat=pg_losses * mask.to(pg_losses.dtype),
+            loss_mask=response_mask,
+            loss_agg_mode=config.loss_agg_mode,
+            **global_batch_info,
+        )
+
+    losses = {
+        "rollout": aggregate_source(rollout_mask),
+        "expert": aggregate_source(expert_mask),
+        "hint": aggregate_source(hint_mask),
+    }
+
+    sft_loss_coef = config.get("sft_loss_coef", 0.0)
+    if sft_loss_coef > 0 and sft_loss_mask is not None:
+        sft_mask = _scaf_bool_mask(sft_loss_mask, response_mask)
+        if torch.any(sft_mask):
+            losses["expert"] = losses["expert"] + masked_mean(-log_prob, sft_mask) * sft_loss_coef
+
+    hint_sft_loss_coef = config.get("hint_sft_loss_coef", 0.0)
+    if config.get("use_hint_sft_loss", False) and hint_sft_loss_coef > 0 and hint_sft_loss_mask is not None:
+        if torch.any(hint_mask):
+            losses["hint"] = losses["hint"] + masked_mean(-log_prob, hint_mask) * hint_sft_loss_coef
+
+    return losses
+
+
 # [ADD] Scaf-GRPO policy objective shared by the verl 0.7 legacy FSDP and
 # Megatron actors. The newer engine worker enters through `ppo_loss` below,
 # while legacy workers call this helper directly.
@@ -54,9 +204,8 @@ def compute_scaf_ppo_policy_loss(
     # if config.get("use_off_policy_loss", False) and off_policy_mask is not None:
     # [ADD] Enter the expert branch only when this micro-batch has expert tokens.
     if (
-        config.get("use_off_policy_loss", False)
-        and off_policy_mask is not None
-        and torch.any(off_policy_mask.to(bool))
+        config.get("use_off_policy_loss", False) and off_policy_mask is not None
+        # and torch.any(off_policy_mask.to(bool))
     ):
         if loss_mode != "vanilla":
             raise ValueError(
@@ -82,6 +231,9 @@ def compute_scaf_ppo_policy_loss(
             loss_agg_mode=loss_agg_mode,
             global_batch_info=config.get("global_batch_info", {}),
             rollout_is_weights=rollout_is_weights,
+            off_policy_loss_type=config.get("off_policy_loss_type", "probability"),
+            loss_remove_clip=config.get("loss_remove_clip", False), # [ADD] luffy
+            loss_remove_token_mean=config.get("loss_remove_token_mean", False), # [ADD] luffy
         )
         pg_loss = off_policy_result["pg_loss"]
         metrics = {
@@ -240,13 +392,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     #     rollout_is_weights=rollout_is_weights,
     # )
     # [ADD] Scaf-GRPO: use mixed on/off-policy loss only when expert off-policy mask and config are enabled.
-    # [DEL] Do not select mixed PPO merely because an all-zero mask field exists.
-    # if config.get("use_off_policy_loss", False) and off_policy_mask is not None:
     # [ADD] The new engine follows the same expert-token gate as legacy actors.
     if (
-        config.get("use_off_policy_loss", False)
-        and off_policy_mask is not None
-        and torch.any(off_policy_mask.to(bool))
+        config.get("use_off_policy_loss", False) and off_policy_mask is not None
+        # and torch.any(off_policy_mask.to(bool))
     ):
         if loss_mode != "vanilla":
             raise ValueError(
@@ -272,6 +421,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             loss_agg_mode=loss_agg_mode,
             global_batch_info=config.global_batch_info,
             rollout_is_weights=rollout_is_weights,
+            off_policy_loss_type=config.get("off_policy_loss_type", "probability"),
         )
         pg_loss = off_policy_result["pg_loss"]
         pg_metrics = {
@@ -342,6 +492,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         policy_loss += kl_loss * config.kl_loss_coef
         metrics["kl_loss"] = kl_loss.detach().item()
         metrics["kl_coef"] = config.kl_loss_coef
+
+    metrics["actor/total_loss"] = policy_loss.detach().item()
 
     return policy_loss, metrics
 
