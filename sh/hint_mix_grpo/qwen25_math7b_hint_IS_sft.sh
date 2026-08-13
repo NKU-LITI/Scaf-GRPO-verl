@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
-# [ADD] Migrated from Scaf-GRPO/sh; keep original experiment settings unless required by verl 0.7.
+
+# TARGET_PIDS=(3729692 3729693)
+
+# echo "正在监测 PID: ${TARGET_PIDS[*]}，等待其全部结束..."
+
+# while true; do
+#     alive=0
+#     for pid in "${TARGET_PIDS[@]}"; do
+#         if kill -0 "$pid" 2>/dev/null; then
+#             alive=1
+#             break
+#         fi
+#     done
+
+#     if [ "$alive" -eq 0 ]; then
+#         break
+#     fi
+
+#     sleep 30
+# done
+
+# echo "所有目标 PID 已结束，开始执行新的训练程序..."
+# echo "---------------------------------------------------"
+
 set -x
 set -euo pipefail
 
@@ -9,10 +32,12 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
+# export WANDB_RUN_ID="${WANDB_RUN_ID:-9xbabglh}" # 从之前的wandb接着训练
+# export WANDB_RESUME="${WANDB_RESUME:-allow}" # 从之前的wandb接着训练
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_replace_prompt_response}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_replace_response_IS_sft_coef0d5}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -84,16 +109,16 @@ python3 -m verl.trainer.main_ppo \
     \
     trainer.nnodes=1 \
     trainer.total_epochs=10 \
-    trainer.save_freq=50 \
+    trainer.save_freq=10 \
     trainer.test_freq=5 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.warmup_steps=5 \
     \
     trainer.with_hint=True \
     trainer.with_expert_fallback=False \
     trainer.hint_stage_count=3 \
-    trainer.replace_hint_prompt_response=True \
-    algorithm.hint_is_correction=False \
+    trainer.replace_hint_prompt_response=False \
+    algorithm.hint_is_correction=True \
     algorithm.hint_log_c_clip=5.0 \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
@@ -101,8 +126,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_off_policy_loss=False \
     actor_rollout_ref.actor.off_policy_reshape=p_div_p_0.1 \
     actor_rollout_ref.actor.sft_loss_coef=0.0 \
-    actor_rollout_ref.actor.use_hint_sft_loss=False \
-    actor_rollout_ref.actor.hint_sft_loss_coef=0.0 \
+    actor_rollout_ref.actor.use_hint_sft_loss=True \
+    actor_rollout_ref.actor.hint_sft_loss_coef=0.5 \
     \
     trainer.rollout_data_dir="${EXP_NAME}/rollout_log/training" \
     trainer.validation_data_dir="${EXP_NAME}/rollout_log/validation" \

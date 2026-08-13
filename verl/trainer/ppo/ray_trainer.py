@@ -2034,6 +2034,8 @@ class RayPPOTrainer:
                         batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
                     # Balance after Scaf-GRPO replacement, when trajectory tensors and rewards are final.
+                    # rollout_log中相同问题的8条rollout不相邻是因为这里做了动态batch处理
+                    # 在 Scaf-GRPO 替换和最终 reward 写入之后 执行的；执行完之后，才进入 old log prob / ref log prob /value / advantage 这些训练计算
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
 

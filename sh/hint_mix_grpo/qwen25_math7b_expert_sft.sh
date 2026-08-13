@@ -1,5 +1,29 @@
 #!/usr/bin/env bash
-# [ADD] Migrated from Scaf-GRPO/sh; keep original experiment settings unless required by verl 0.7.
+
+TARGET_PIDS=(1242602 1242603)
+
+echo "正在监测 PID: ${TARGET_PIDS[*]}，等待其全部结束..."
+
+while true; do
+    alive=0
+    for pid in "${TARGET_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            alive=1
+            break
+        fi
+    done
+
+    if [ "$alive" -eq 0 ]; then
+        break
+    fi
+
+    sleep 30
+done
+
+echo "所有目标 PID 已结束，开始执行新的训练程序..."
+echo "---------------------------------------------------"
+
+
 set -x
 set -euo pipefail
 
@@ -12,7 +36,7 @@ export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_replace_prompt_response}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_expert_luffy_sft_coef1d0}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -33,8 +57,6 @@ data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
 # epoch=2, step=24, warmup_steps内lr线性增加到设置的值
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    trainer.n_gpus_per_node=2 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     \
     data.train_files="${data_train_path}" \
     data.val_files="${data_val_path}" \
@@ -75,6 +97,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     reward_model.use_reward_loop=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=-1 \
@@ -83,24 +106,24 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=0.0 \
     \
     trainer.nnodes=1 \
+    trainer.n_gpus_per_node=2 \
     trainer.total_epochs=10 \
-    trainer.save_freq=50 \
+    trainer.save_freq=20 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \
     \
-    trainer.with_hint=True \
-    trainer.with_expert_fallback=False \
+    trainer.with_hint=False \
+    trainer.with_expert_fallback=True \
     trainer.hint_stage_count=3 \
     trainer.replace_hint_prompt_response=True \
-    algorithm.hint_is_correction=False \
-    algorithm.hint_log_c_clip=5.0 \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
     \
-    actor_rollout_ref.actor.use_off_policy_loss=False \
+    actor_rollout_ref.actor.use_off_policy_loss=True \
+    actor_rollout_ref.actor.off_policy_loss_type=probability \
     actor_rollout_ref.actor.off_policy_reshape=p_div_p_0.1 \
-    actor_rollout_ref.actor.sft_loss_coef=0.0 \
+    actor_rollout_ref.actor.sft_loss_coef=1.0 \
     actor_rollout_ref.actor.use_hint_sft_loss=False \
     actor_rollout_ref.actor.hint_sft_loss_coef=0.0 \
     \
@@ -111,7 +134,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger="['console','wandb','file']" \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name="${EXP_NAME}" \
+    \
+    algorithm.norm_adv_by_std_in_grpo=False \
+    actor_rollout_ref.actor.loss_remove_clip=True \
+    actor_rollout_ref.actor.loss_remove_token_mean=True \
     "$@"
 
-
+    # algorithm.norm_adv_by_std_in_grpo=False \ # add as luffy，去掉grpo std，默认为true
     # actor_rollout_ref.rollout.max_model_len=12288 \
