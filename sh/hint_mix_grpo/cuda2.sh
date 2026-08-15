@@ -1,9 +1,39 @@
 #!/usr/bin/env bash
-# [ADD] Migrated from Scaf-GRPO/sh; keep original experiment settings unless required by verl 0.7.
 set -x
 set -euo pipefail
 
 source /home/liting/miniconda3/etc/profile.d/conda.sh
+
+
+
+TARGET_PIDS=(1467261 1467262)
+
+# TARGET_PIDS=(1795604 1795601)
+
+echo "正在监测 PID: ${TARGET_PIDS[*]}，等待它们全部结束..."
+
+while true; do
+    alive=0
+
+    for pid in "${TARGET_PIDS[@]}"; do
+        if ps -p "$pid" > /dev/null 2>&1; then
+            alive=1
+        fi
+    done
+
+    # 两个PID都不存在
+    if [ "$alive" -eq 0 ]; then
+        break
+    fi
+
+    sleep 30
+done
+
+echo "========================================"
+echo "所有目标 PID 已结束，开始执行新的训练程序..."
+echo "========================================"
+
+
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TOKENIZERS_PARALLELISM=false
@@ -12,7 +42,7 @@ export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_replace_prompt_response}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_hint_replace_prompt_response_cuda2}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -83,8 +113,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=0.0 \
     \
     trainer.nnodes=1 \
-    trainer.total_epochs=10 \
-    trainer.save_freq=50 \
+    trainer.total_epochs=20 \
+    trainer.save_freq=100 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \

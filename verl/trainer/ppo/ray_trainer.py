@@ -1583,14 +1583,15 @@ class RayPPOTrainer:
             if mask_key not in batch.batch:
                 batch.batch[mask_key] = torch.zeros_like(response_mask) # shape相同但是全零，后面发生替换后再置1
 
-        # token-level reward聚合成traj-level，reward_tensor_first: [B × rollout.n, max_response_length],对最后一维求和
-        reward_sums_tensor = reward_tensor_first.sum(dim=-1).float()
+        # token-level reward 聚合成 traj-level，reward_tensor_first: [B × rollout.n, max_response_length],对最后一维求和
+        reward_sums_tensor = reward_tensor_first.sum(dim=-1).float() # len=512
         reward_sums = reward_sums_tensor.detach().cpu().numpy()
         reward_before_mean = reward_sums_tensor.mean().item()
 
-        uid_to_indices: dict[Any, list[int]] = defaultdict(list) # 根据uid把一道题的rollout分组
+        # 根据uid对rollout分组
+        uid_to_indices: dict[Any, list[int]] = defaultdict(list) # {"uid1": [idx0,idx1,...,idx8], "uid2": [...]}
         for idx, uid in enumerate(batch.non_tensor_batch["uid"]):
-            uid_to_indices[uid].append(idx)  # 当前题的N个轨迹下标
+            uid_to_indices[uid].append(idx)
 
         # 1. 找出全错的题目
         failed_uids = {
@@ -1617,13 +1618,13 @@ class RayPPOTrainer:
         # successful hint stage, matching the actual replacement rule below.
         for stage in range(1, self.hint_stage_count + 1):
             scaf_metrics[f"batch/scaf_selected_hint_stage_{stage}_uid_count"] = 0
-        if not failed_uids:
+        if not failed_uids and not expert_enabled:
             metrics.update(scaf_metrics)
             return batch, reward_tensor_first, reward_extra_infos_dict_first, False
 
-        # 每道失败题目只保留一条基础样本，提供所在uid的hint去构造hint prompt, len=train_batch_size=64
-        base_indices = [indices[0] for uid, indices in uid_to_indices.items() if uid in failed_uids] 
-        failed_base_batch = batch.select_idxs(base_indices)
+        # 每道失败题目只保留一条基础样本
+        failed_base_indices = [indices[0] for uid, indices in uid_to_indices.items() if uid in failed_uids]  # 每道错误题第一条轨迹序号
+        failed_base_batch = batch.select_idxs(failed_base_indices) 
 
         hint_data_map = {} # 保存 Hint 成功的题目, (hinted_output, best_idx, hint_stage,)
         fully_failed_uids = set(failed_uids) # 存储hint引导失败的题目，去做轨迹注入
@@ -1679,8 +1680,7 @@ class RayPPOTrainer:
                         selected_hint_stages.count(stage)
                     )
 
-                # Keep the behavior probability under x+hint before response-only
-                # replacement rebuilds the sample with the original prompt x.
+                # 只替换response，添加IS ratio修正项
                 if hint_data_map and not self.replace_hint_prompt_response and hint_is_enabled:
                     if "rollout_log_probs" in hinted_output.batch:
                         hint_behavior_log_probs = hinted_output.batch["rollout_log_probs"].detach().float()
@@ -1701,16 +1701,25 @@ class RayPPOTrainer:
                         len(batch), dtype=torch.bool, device=response_mask.device
                     )
 
-        # hint失败的构造专家轨迹
+        # [MOD] 按照Luffy实现全替换，优先错误替换，做对照
+        expert_replace_idx = {}
+        for uid, indices in uid_to_indices.items():
+            if not indices:
+                continue
+            wrong_indices = [idx for idx in indices if reward_sums[idx] <=0]
+            expert_replace_idx[uid] = [wrong_indices[0] if wrong_indices else indices[0]]
+        expert_base_indices = [indices[0] for uid, indices in uid_to_indices.items() if len(indices) > 0]
+        expert_base_batch = batch.select_idxs(expert_base_indices) # len=64, len(batch)=512
+
         expert_data_map = {}
-        if expert_enabled and "expert_target" in failed_base_batch.non_tensor_batch:
-            expert_truncation = self.config.trainer.get("expert_truncation", "right") 
+        if expert_enabled and "expert_target" in expert_base_batch.non_tensor_batch: # [MOD] failed_base_batch
+            expert_truncation = self.config.trainer.get("expert_truncation", "right")
             max_response_length = self.config.data.max_response_length
-            for row_idx, uid in enumerate(failed_base_batch.non_tensor_batch["uid"]):
-                if uid not in fully_failed_uids:
-                    continue
+            for row_idx, uid in enumerate(expert_base_batch.non_tensor_batch["uid"]): # [MOD] failed_base_batch
+                # if uid not in fully_failed_uids: # [MOD]
+                #    continue
                 expert_data = build_expert_response_data(
-                    failed_base_batch,
+                    expert_base_batch, # [MOD] failed_base_batch
                     row_idx,
                     self.tokenizer,
                     max_response_length=max_response_length,
@@ -1724,23 +1733,18 @@ class RayPPOTrainer:
         expert_replaced_indices = [] # 只记录实际注入专家轨迹的 batch 行号
         per_uid_replaced = defaultdict(int) # 每个问题已经替换了多少条 rollout
 
-        # Tensor keys needed when keeping the full hinted trajectory.
-        # replace_hint_prompt_response=True replaces prompt and response;
-        # False keeps the original prompt and swaps only the response.
         tensor_keys = ["prompts", "responses", "input_ids", "attention_mask", "position_ids", "response_mask"]
 
-        for row_idx, uid in enumerate(batch.non_tensor_batch["uid"]): # 遍历整个batch
-            # 每个问题最多被替换 replace_num 条
+        for row_idx, uid in enumerate(batch.non_tensor_batch["uid"]):
             if per_uid_replaced[uid] >= self.replace_num:
                 continue
 
-            # 替换Hint，有两种替换模式
             if uid in hint_data_map:
                 hinted_output, hint_idx, _ = hint_data_map[uid]
-                if self.replace_hint_prompt_response: # True, 替换prompt+response
+                if self.replace_hint_prompt_response: # 替换prompt+response
                     for key in tensor_keys:
                         batch.batch[key][row_idx] = hinted_output.batch[key][hint_idx].to(batch.batch[key].device)
-                else: # False, 只替换response
+                else: # 只替换response
                     response = hinted_output.batch["responses"][hint_idx].to(batch.batch["responses"].device)
                     response_mask_new = hinted_output.batch["response_mask"][hint_idx].to(
                         batch.batch["response_mask"].device
@@ -1768,15 +1772,15 @@ class RayPPOTrainer:
                 replaced_indices.append(row_idx)
                 per_uid_replaced[uid] += 1
 
-            # 替换专家轨迹
-            elif uid in expert_data_map:
+
+            elif (uid in expert_data_map and row_idx == expert_replace_idx.get(uid)) :
                 expert_data = expert_data_map[uid]
 
-                # 标识其它mask，expert_data包含：responses,input_ids,attention_mask,position_ids,response_mask,sft_loss_mask,off_policy_mask
+                # expert_data包含：responses,input_ids,attention_mask,position_ids,response_mask,sft_loss_mask,off_policy_mask
                 for key, value in expert_data.items(): 
                     batch.batch[key][row_idx] = value.to(batch.batch[key].device)
 
-                batch.batch["hint_sft_loss_mask"][row_idx].zero_() # 清除掉hint轨迹的处理
+                batch.batch["hint_sft_loss_mask"][row_idx].zero_() # expert非hint
                 if "hint_behavior_log_probs" in batch.batch:
                     batch.batch["hint_behavior_log_probs"][row_idx].zero_()
                     batch.batch["hint_offpolicy_mask"][row_idx] = False
@@ -1788,7 +1792,7 @@ class RayPPOTrainer:
         if not replaced_indices:
             return batch, reward_tensor_first, reward_extra_infos_dict_first, False
 
-        # 重新计算修改后的batch的reward
+        # 重新计算修改后的batch reward
         reward_tensor_recomputed, reward_extra_infos_dict_recomputed = self._scaf_recompute_reward(batch)
         replaced_indices = sorted(set(replaced_indices))
         expert_replaced_indices = sorted(set(expert_replaced_indices))
@@ -1796,11 +1800,7 @@ class RayPPOTrainer:
         # 统计实际注入专家轨迹的数量，以及这些专家轨迹通过 reward verifier 的数量。
         expert_injected_count = len(expert_replaced_indices)
         if expert_injected_count > 0:
-            expert_reward_after = (
-                reward_tensor_recomputed[expert_replaced_indices]
-                .sum(dim=-1)
-                .float()
-            )
+            expert_reward_after = (reward_tensor_recomputed[expert_replaced_indices].sum(dim=-1).float())
             expert_solved_count = int((expert_reward_after > 0).sum().item())
             expert_success_rate = expert_solved_count / expert_injected_count
         else:
@@ -1820,7 +1820,6 @@ class RayPPOTrainer:
         metrics["batch/scaf_reward_after_mean"] = reward_after_mean
         metrics["batch/scaf_reward_gain"] = reward_after_mean - reward_before_mean
 
-
         reward_extra_infos_dict = deepcopy(reward_extra_infos_dict_first)
         for key, recomputed_values in reward_extra_infos_dict_recomputed.items():
             if key not in reward_extra_infos_dict:
@@ -1829,6 +1828,7 @@ class RayPPOTrainer:
             for row_idx in replaced_indices:
                 reward_extra_infos_dict[key][row_idx] = recomputed_values[row_idx]
         return batch, reward_tensor_final, reward_extra_infos_dict, True
+
 
     def fit(self):
         """

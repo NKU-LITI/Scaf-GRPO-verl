@@ -1588,7 +1588,8 @@ def compute_token_on_off_policy_loss(
     # Keep ordinary rollout tokens identical to verl's vanilla PPO objective even
     # when an expert token happens to share the same micro-batch.
     on_pg_losses1 = -advantages * ratio
-    if loss_remove_clip:
+
+    if loss_remove_clip: # luffy去掉clip
         # L_on = - A * pi_theta / pi_old
         on_pg_losses = on_pg_losses1
 
@@ -1621,8 +1622,7 @@ def compute_token_on_off_policy_loss(
     prob = torch.exp(log_prob)
     
     if off_policy_loss_type == "advantage_weighted_log_prob":
-        # Expert trajectories have no known behavior-policy probability. Use
-        # reward/advantage-weighted log-likelihood so low-probability expert
+        # Expert trajectories have no known behavior-policy probability. Use reward/advantage-weighted log-likelihood so low-probability expert
         # tokens retain a non-vanishing gradient: dL/dlog(pi) = -A.
         off_pg_losses = -advantages * log_prob
         off_ratio = torch.ones_like(log_prob)
@@ -1646,7 +1646,7 @@ def compute_token_on_off_policy_loss(
         if off_policy_min_clip is not None:
             off_ratio = torch.clamp(off_ratio, min=off_policy_min_clip)
 
-        off_pg_losses = -advantages * off_ratio
+        off_pg_losses = -advantages * off_ratio # * 2
     else:
         raise ValueError(
             "off_policy_loss_type must be 'probability' or 'advantage_weighted_log_prob'; "

@@ -39,7 +39,7 @@ def _scaf_bool_mask(mask: torch.Tensor | None, response_mask: torch.Tensor) -> t
         return torch.zeros_like(response_mask, dtype=torch.bool)
     return mask.to(device=response_mask.device, dtype=torch.bool) & response_mask
 
-
+# [ADD] hint loss
 def compute_scaf_source_policy_losses(
     config,
     old_log_prob: torch.Tensor,
@@ -180,9 +180,7 @@ def compute_scaf_source_policy_losses(
     return losses
 
 
-# [ADD] Scaf-GRPO policy objective shared by the verl 0.7 legacy FSDP and
-# Megatron actors. The newer engine worker enters through `ppo_loss` below,
-# while legacy workers call this helper directly.
+# [ADD] loss计算
 def compute_scaf_ppo_policy_loss(
     config,
     old_log_prob: torch.Tensor,
@@ -200,8 +198,6 @@ def compute_scaf_ppo_policy_loss(
     if hint_is_weights is not None:
         advantages = advantages * hint_is_weights.detach()
 
-    # [DEL] A present but all-zero mask incorrectly forced every micro-batch through the mixed objective and bypassed its configured native PPO loss.
-    # if config.get("use_off_policy_loss", False) and off_policy_mask is not None:
     # [ADD] Enter the expert branch only when this micro-batch has expert tokens.
     if (
         config.get("use_off_policy_loss", False) and off_policy_mask is not None

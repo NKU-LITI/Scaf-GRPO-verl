@@ -345,8 +345,17 @@ class FlowRLActorRolloutRefWorker(ActorRolloutRefWorker):
                 lr=optim_config.lr,
                 betas=optim_config.get("betas", (0.9, 0.999)),
                 weight_decay=optim_config.get("weight_decay", 1e-2),
+                foreach=False, # [ADD] 让峰值小于80G
             )
 
+            print(
+                "[DEBUG OPTIMIZER INIT]",
+                type(actor_optimizer),
+                actor_optimizer.defaults,
+                flush=True,
+            )
+
+            
             total_steps = optim_config.get("total_training_steps", 0)
             num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
             warmup_style = optim_config.get("warmup_style", "constant")

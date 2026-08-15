@@ -97,6 +97,7 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             self.scaler = None
 
+    # [ADD] [METRIC] 添加grad_norm指标
     def _compute_scaf_source_grad_norms(
         self,
         source_losses: dict[str, torch.Tensor],
@@ -523,9 +524,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
-        mini_batches = data.split(self.config.ppo_mini_batch_size)
+        mini_batches = data.split(self.config.ppo_mini_batch_size) # mini_batch=32，每个mini_batch再分多个micro_batch
 
-        on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1 # 目前设置Mini_batch=2
+        on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1 # mini_batch=32，一个mini_batch对应一次更新
 
 
         metrics = {
@@ -541,7 +542,7 @@ class DataParallelPPOActor(BasePPOActor):
                     self.gradient_accumulation = ( # 256/2 = 128
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                     )
-                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu) # mi'ni
 
                 self.actor_optimizer.zero_grad()
 
@@ -642,6 +643,7 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     micro_batch_metrics["actor/total_loss"] = policy_loss.detach().item()
+                    # [ADD] hint轨迹单独添加is weight
                     source_losses = compute_scaf_source_policy_losses(
                         config=self.config,
                         old_log_prob=old_log_prob,
