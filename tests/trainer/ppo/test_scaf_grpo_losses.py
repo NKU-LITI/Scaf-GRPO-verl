@@ -4,7 +4,7 @@ import torch
 from omegaconf import OmegaConf
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import compute_policy_loss_vanilla, compute_token_on_off_policy_loss
+from verl.trainer.ppo.core_algos import compute_token_on_off_policy_loss
 from verl.trainer.ppo.scaf_grpo_utils import (
     build_expert_response_data,
     build_hinted_gen_batch,
@@ -36,24 +36,14 @@ def _actor_config(loss_mode: str = "vanilla"):
     )
 
 
-def test_mixed_loss_keeps_on_policy_tokens_identical_to_vanilla_ppo():
+def test_mixed_loss_uses_luffy_on_policy_clipping_without_dapo_lower_cap():
     old_log_prob = torch.zeros(1, 2)
     log_prob = torch.tensor([[torch.log(torch.tensor(10.0)), -1.0]])
     advantages = torch.tensor([[-1.0, 1.0]])
     response_mask = torch.ones(1, 2, dtype=torch.bool)
     off_policy_mask = torch.tensor([[False, True]])
-    rollout_is_weights = torch.tensor([[0.5, 7.0]])
     config = _actor_config()
 
-    expected_on_loss, _ = compute_policy_loss_vanilla(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        response_mask=response_mask & ~off_policy_mask,
-        loss_agg_mode="token-mean",
-        config=config,
-        rollout_is_weights=rollout_is_weights,
-    )
     mixed = compute_token_on_off_policy_loss(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
@@ -66,11 +56,13 @@ def test_mixed_loss_keeps_on_policy_tokens_identical_to_vanilla_ppo():
         clip_ratio_c=config.clip_ratio_c,
         clip_upper_bound=config.clip_upper_bound,
         loss_agg_mode="token-mean",
-        rollout_is_weights=rollout_is_weights,
     )
 
-    assert mixed["on_pg_loss"] == pytest.approx(expected_on_loss.item())
-    assert mixed["on_pg_clipfrac_lower"] == pytest.approx(1.0)
+    # LUFFY uses max(unclipped, clipped) and does not apply verl/DAPO's
+    # additional negative-advantage cap at clip_ratio_c.
+    assert mixed["on_pg_loss"] == pytest.approx(10.0)
+    assert mixed["on_pg_clipfrac"] == pytest.approx(0.0)
+    assert mixed["on_pg_clipfrac_lower"] == pytest.approx(0.0)
 
 
 def test_expert_mixed_loss_rejects_non_vanilla_policy_mode():
@@ -107,7 +99,7 @@ def test_expert_advantage_weighted_log_prob_has_nonvanishing_gradient():
     assert result["off_ratio_mean"] == pytest.approx(1.0)
 
 
-def test_fixed_length_loss_is_invariant_to_micro_batch_duplication():
+def test_fixed_length_loss_matches_luffy_micro_batch_scaling():
     config = _actor_config()
 
     def compute(batch_size):
@@ -124,7 +116,31 @@ def test_fixed_length_loss_is_invariant_to_micro_batch_duplication():
         )["pg_loss"]
 
     assert compute(1).item() == pytest.approx(2.0)
-    assert compute(2).item() == pytest.approx(2.0)
+    assert compute(2).item() == pytest.approx(4.0)
+
+
+def test_probability_objective_matches_luffy_p_div_p_point_one():
+    log_prob = torch.log(torch.tensor([[0.2, 0.4]]))
+    advantages = torch.tensor([[2.0, -3.0]])
+    response_mask = torch.ones_like(log_prob, dtype=torch.bool)
+    off_policy_mask = torch.tensor([[True, False]])
+
+    result = compute_token_on_off_policy_loss(
+        old_log_prob=log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        off_policy_mask=off_policy_mask,
+        cliprange=0.2,
+        off_policy_reshape="p_div_p_0.1",
+        loss_remove_clip=True,
+    )
+
+    expected_off_loss = -2.0 * (0.2 / (0.2 + 0.1))
+    expected_on_loss = 3.0
+    assert result["off_pg_loss"] == pytest.approx(expected_off_loss)
+    assert result["on_pg_loss"] == pytest.approx(expected_on_loss)
+    assert result["pg_loss"].item() == pytest.approx((expected_off_loss + expected_on_loss) / 2)
 
 
 def test_expert_sft_loss_only_uses_marked_response_tokens():

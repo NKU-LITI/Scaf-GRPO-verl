@@ -122,48 +122,48 @@ class DataParallelPPOActor(BasePPOActor):
 
 
 
-    # [DEBUG] Attach debugger to rank-0 actor worker.
-    def _maybe_wait_for_actor_debugger(self):
-        if os.environ.get("DEBUG_ACTOR_WORKER", "0") != "1":
-            return
+    # # [DEBUG] Attach debugger to rank-0 actor worker.
+    # def _maybe_wait_for_actor_debugger(self):
+    #     if os.environ.get("DEBUG_ACTOR_WORKER", "0") != "1":
+    #         return
 
-        # 每个 Actor Worker 只执行一次
-        if getattr(self, "_actor_debugger_initialized", False):
-            return
+    #     # 每个 Actor Worker 只执行一次
+    #     if getattr(self, "_actor_debugger_initialized", False):
+    #         return
 
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            rank = torch.distributed.get_rank()
-        else:
-            rank = int(os.environ.get("RANK", "0"))
+    #     if torch.distributed.is_available() and torch.distributed.is_initialized():
+    #         rank = torch.distributed.get_rank()
+    #     else:
+    #         rank = int(os.environ.get("RANK", "0"))
 
-        # 多卡时只有 rank 0 监听端口，否则多个进程会争用同一个端口
-        if rank != 0:
-            self._actor_debugger_initialized = True
-            return
+    #     # 多卡时只有 rank 0 监听端口，否则多个进程会争用同一个端口
+    #     if rank != 0:
+    #         self._actor_debugger_initialized = True
+    #         return
 
-        self._actor_debugger_initialized = True
+    #     self._actor_debugger_initialized = True
 
-        import debugpy
+    #     import debugpy
 
-        host = os.environ.get("DEBUG_ACTOR_HOST", "127.0.0.1")
-        port = int(os.environ.get("DEBUG_ACTOR_PORT", "5681"))
+    #     host = os.environ.get("DEBUG_ACTOR_HOST", "127.0.0.1")
+    #     port = int(os.environ.get("DEBUG_ACTOR_PORT", "5681"))
 
-        debugpy.listen((host, port))
-        print(
-            f"[Actor Debug] pid={os.getpid()}, rank={rank}, "
-            f"waiting for debugger at {host}:{port}",
-            flush=True,
-        )
+    #     debugpy.listen((host, port))
+    #     print(
+    #         f"[Actor Debug] pid={os.getpid()}, rank={rank}, "
+    #         f"waiting for debugger at {host}:{port}",
+    #         flush=True,
+    #     )
 
-        debugpy.wait_for_client()
+    #     debugpy.wait_for_client()
 
-        print(
-            f"[Actor Debug] debugger attached, pid={os.getpid()}, rank={rank}",
-            flush=True,
-        )
+    #     print(
+    #         f"[Actor Debug] debugger attached, pid={os.getpid()}, rank={rank}",
+    #         flush=True,
+    #     )
 
-        # Attach 成功后主动暂停一次
-        debugpy.breakpoint()
+    #     # Attach 成功后主动暂停一次
+    #     debugpy.breakpoint()
 
 
 
@@ -475,13 +475,15 @@ class DataParallelPPOActor(BasePPOActor):
     def update_policy(self, data: DataProto):
 
         # [DEBUG] 第一次进入 actor update 时等待 VS Code Attach
-        self._maybe_wait_for_actor_debugger()
+        # self._maybe_wait_for_actor_debugger()
+        
+        # breakpoint()       # [DEBUG]
 
         import os
-        print(
-            f"[DEBUG actor pid={os.getpid()}] enter update_policy",
-            flush=True
-        )
+        # print(
+        #     f"[DEBUG actor pid={os.getpid()}] enter update_policy",
+        #     flush=True
+        # )
 
 
         # make sure we are in training mode

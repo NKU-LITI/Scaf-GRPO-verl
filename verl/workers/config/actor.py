@@ -162,10 +162,18 @@ class ActorConfig(BaseConfig):
     off_policy_loss_type: str = "probability"
     # [ADD] Scaf-GRPO: probability reshape used by expert off-policy token weighting.
     off_policy_reshape: str = "p_div_p_0.1"
+    # LUFFY-compatible reshape controls.
+    off_policy_reshape_weight: float = 1.0
+    off_policy_reshape_pow_exp: float = 0.5
+    on_policy_reshape: str = "no_reshape"
+    on_policy_reshape_weight: float = 1.0
+    on_policy_reshape_pow_exp: float = 0.5
     # [ADD] Scaf-GRPO: optional upper clipping bound for expert off-policy token weighting; negative disables.
     off_policy_max_clip: float = -1.0
     # [ADD] Scaf-GRPO: optional lower clipping bound for expert off-policy token weighting; negative disables.
     off_policy_min_clip: float = -1.0
+    # LUFFY-compatible optional probability filter; negative disables.
+    all_max_clip: float = -1.0
     # [ADD] Scaf-GRPO: upper PPO ratio bound used by the on-policy branch in mixed on/off-policy loss.
     clip_upper_bound: float = 1.0
     tau_pos: float = 1.0

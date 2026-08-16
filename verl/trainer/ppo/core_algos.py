@@ -1557,8 +1557,15 @@ def compute_token_on_off_policy_loss(
     clip_ratio_c: float = 3.0,
     clip_upper_bound: float = 1.0,
     off_policy_reshape: str = "p_div_p_0.1",
+    off_policy_reshape_weight: float = 1.0, # [ADD]
+    off_policy_reshape_pow_exp: float = 0.5,
+    on_policy_reshape: str = "no_reshape",
+    on_policy_reshape_weight: float = 1.0,
+    on_policy_reshape_pow_exp: float = 0.5, # [ADD]
     off_policy_max_clip: float | None = None,
     off_policy_min_clip: float | None = None,
+    all_max_clip: float | None = None, # [ADD]
+    target_probs: torch.Tensor | None = None, # [ADD]
     loss_agg_mode: str = "token-mean",
     global_batch_info: Optional[dict[str, Any]] = None,
     rollout_is_weights: torch.Tensor | None = None,
@@ -1570,6 +1577,7 @@ def compute_token_on_off_policy_loss(
     off_policy_mask = (off_policy_mask.to(bool)) & response_mask
     on_policy_mask = response_mask & (~off_policy_mask)
 
+    # 只对mask为True的token求平均
     def safe_masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         # A micro-batch can contain no expert or no on-policy tokens.
         # Keep the unused branch finite and differentiably zero.
@@ -1577,16 +1585,36 @@ def compute_token_on_off_policy_loss(
             return values.sum() * 0.0
         return verl_F.masked_mean(values, mask)
 
-    negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
-    ratio = torch.exp(negative_approx_kl)
+    # [MOD] luffy没有这部分clip
+    # negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
+    negative_approx_kl = log_prob - old_log_prob
+    if on_policy_reshape == "no_reshape":
+        ratio = torch.exp(negative_approx_kl)
+    elif on_policy_reshape == "logp":
+        ratio = negative_approx_kl
+    elif on_policy_reshape == "p_logp":
+        ratio = torch.exp(negative_approx_kl) + on_policy_reshape_weight * negative_approx_kl
+    elif on_policy_reshape == "square_root":
+        ratio = torch.sqrt(torch.exp(negative_approx_kl))
+    elif on_policy_reshape == "pow":
+        ratio = torch.pow(torch.exp(negative_approx_kl), on_policy_reshape_pow_exp)
+    elif on_policy_reshape in ("p_div_p_0.1", "p_div_p_0.5"):
+        offset = 0.1 if on_policy_reshape == "p_div_p_0.1" else 0.5
+        prob = torch.exp(log_prob)
+        old_prob = torch.exp(old_log_prob)
+        ratio = (prob / (prob + offset)) / (old_prob / (old_prob + offset))
+    else:
+        raise ValueError(f"Invalid on_policy_reshape: {on_policy_reshape}")
 
-    cliprange_low = cliprange if cliprange_low is None else cliprange_low
-    cliprange_high = cliprange if cliprange_high is None else cliprange_high
-    if clip_ratio_c <= 1.0:
-        raise ValueError(f"clip_ratio_c must be greater than 1.0, got {clip_ratio_c}.")
+    # ratio = torch.exp(negative_approx_kl) # 默认是no_shape
 
-    # Keep ordinary rollout tokens identical to verl's vanilla PPO objective even
-    # when an expert token happens to share the same micro-batch.
+    # cliprange_low = cliprange if cliprange_low is None else cliprange_low
+    # cliprange_high = cliprange if cliprange_high is None else cliprange_high
+    # if clip_ratio_c <= 1.0:
+    #     raise ValueError(f"clip_ratio_c must be greater than 1.0, got {clip_ratio_c}.")
+
+    # [MOD] LUFFY没有这部分clip
+    # negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
     on_pg_losses1 = -advantages * ratio
 
     if loss_remove_clip: # luffy去掉clip
@@ -1597,11 +1625,10 @@ def compute_token_on_off_policy_loss(
         on_pg_clipfrac = zero
         on_pg_clipfrac_lower = zero
     else:
-        on_pg_losses2 = -advantages * torch.clamp(
-            ratio,
-            1 - cliprange_low,
-            max(1 + cliprange_high, clip_upper_bound),
-        )
+        # on_pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, max(1 + cliprange_high, clip_upper_bound),)   
+        upper_bound = max(clip_upper_bound, 1.0 + cliprange)
+        on_pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, upper_bound,) # [MOD]
+
         on_pg_losses_clipped = torch.maximum(on_pg_losses1, on_pg_losses2)
         on_pg_losses3 = -advantages * clip_ratio_c
         on_pg_losses = torch.where(
@@ -1622,51 +1649,82 @@ def compute_token_on_off_policy_loss(
     prob = torch.exp(log_prob)
     
     if off_policy_loss_type == "advantage_weighted_log_prob":
-        # Expert trajectories have no known behavior-policy probability. Use reward/advantage-weighted log-likelihood so low-probability expert
-        # tokens retain a non-vanishing gradient: dL/dlog(pi) = -A.
+        # dL/dlog(pi) = -A.
         off_pg_losses = -advantages * log_prob
         off_ratio = torch.ones_like(log_prob)
     elif off_policy_loss_type == "probability":
-        # Bounded probability objective retained for backward compatibility.
-        if off_policy_reshape == "p_div_p_0.1":
-            off_ratio = prob / (prob + 0.1)
-        elif off_policy_reshape == "p_div_p_0.3":
-            off_ratio = prob / (prob + 0.3)
-        elif off_policy_reshape == "p_div_p_0.5":
-            off_ratio = prob / (prob + 0.5)
-        elif off_policy_reshape in ("p", "no_reshape"):
-            off_ratio = prob
-        elif off_policy_reshape in ("square_root", "pow"):
-            off_ratio = torch.sqrt(prob)
+        if target_probs is not None:
+            if target_probs.shape != log_prob.shape:
+                raise ValueError(
+                    f"target_probs must match log_prob shape; got {target_probs.shape} and {log_prob.shape}."
+                )
+            off_ratio = prob / (target_probs + 1e-6)
+            off_ratio = off_ratio * off_policy_mask
         else:
-            raise ValueError(f"Unsupported off_policy_reshape: {off_policy_reshape}")
+            if off_policy_reshape in ("p", "no_reshape"):
+                pass
+            elif off_policy_reshape == "logp":
+                off_ratio = log_prob * off_policy_reshape_weight
+            elif off_policy_reshape == "p_logp":
+                off_ratio = prob + log_prob * off_policy_reshape_weight
+            elif off_policy_reshape == "square_root":
+                off_ratio = torch.sqrt(prob)
+            elif off_policy_reshape == "p_div_p_0.1":
+                off_ratio = prob / (prob + 0.1)
+            elif off_policy_reshape == "p_div_p_0.3":
+                off_ratio = prob / (prob + 0.3)
+            elif off_policy_reshape == "p_div_p_0.5":
+                off_ratio = prob / (prob + 0.5)
+            elif off_policy_reshape in ("p", "no_reshape"):
+                off_ratio = prob
+            elif off_policy_reshape in ("square_root", "pow"):
+                off_ratio = torch.sqrt(prob)
+            else:
+                raise ValueError(f"Unsupported off_policy_reshape: {off_policy_reshape}")
 
         if off_policy_max_clip is not None:
             off_ratio = torch.clamp(off_ratio, max=off_policy_max_clip)
         if off_policy_min_clip is not None:
             off_ratio = torch.clamp(off_ratio, min=off_policy_min_clip)
 
-        off_pg_losses = -advantages * off_ratio # * 2
+        # off_pg_losses = -advantages * off_ratio # * 2
+        off_pg_losses = -(advantages * off_ratio).detach() * log_prob # [MOD]
     else:
         raise ValueError(
             "off_policy_loss_type must be 'probability' or 'advantage_weighted_log_prob'; "
             f"got {off_policy_loss_type!r}."
         )
 
-    pg_losses = torch.where(off_policy_mask, off_pg_losses, on_pg_losses)
+    off_ratio_max_clip_frac = safe_masked_mean((off_ratio == off_policy_max_clip).float(), off_policy_mask
+                                               ) if off_policy_max_clip is not None else log_prob.sum() * 0.0 # expert token中触发lower clip的比例
+    off_ratio_min_clip_frac = safe_masked_mean((off_ratio == off_policy_min_clip).float(), off_policy_mask
+                                               ) if off_policy_min_clip is not None else log_prob.sum() * 0.0
+
+    off_pg_clipfrac = log_prob.sum() * 0.0
+    pg_losses = torch.where(off_policy_mask, off_pg_losses, on_pg_losses) # 分配on和off loss
+    effective_response_mask = response_mask
+    if all_max_clip is not None: # all_max_clip去掉概率>p的token
+        probability_mask = prob <= all_max_clip
+        effective_response_mask = response_mask & probability_mask
+        pg_losses = pg_losses * probability_mask
+
     if loss_remove_token_mean:
-        pg_loss = (pg_losses * response_mask.to(pg_losses.dtype)).sum() / (
-            response_mask.shape[0] * response_mask.shape[-1]
-        )
+        # pg_loss = (pg_losses * response_mask.to(pg_losses.dtype)).sum() / (response_mask.shape[0] * response_mask.shape[-1])
+        # pg_losses.shape = [B, T]，分子是micro_batch上所有有效token的loss和，分母只有T，没有B
+        # 去掉 是 不去掉 的B倍
+        pg_loss = (pg_losses * effective_response_mask.to(pg_losses.dtype)).sum() / response_mask.shape[-1] # [MOD]
     else:
-        global_batch_info = global_batch_info or {}
-        pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **global_batch_info)
+        # global_batch_info = global_batch_info or {}
+        # pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **global_batch_info)
+        # 标准token mean loss，分子是micro_batch上所有有效token的loss和，分母是token总数B*T
+        pg_loss = safe_masked_mean(pg_losses, effective_response_mask)
 
-
+    # 监控指标
     on_pg_loss = safe_masked_mean(on_pg_losses, on_policy_mask)
     off_pg_loss = safe_masked_mean(off_pg_losses, off_policy_mask)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
     off_policy_prob = safe_masked_mean(prob, off_policy_mask)
+    on_policy_prob = safe_masked_mean(torch.exp(old_log_prob), on_policy_mask)
     off_ratio_mean = safe_masked_mean(off_ratio, off_policy_mask)
 
     return {
@@ -1675,9 +1733,13 @@ def compute_token_on_off_policy_loss(
         "off_pg_loss": off_pg_loss.detach().item(),
         "on_pg_clipfrac": on_pg_clipfrac.detach().item(),
         "on_pg_clipfrac_lower": on_pg_clipfrac_lower.detach().item(),
+        "off_pg_clipfrac": off_pg_clipfrac.detach().item(), # [MOD]
         "ppo_kl": ppo_kl.detach().item(),
         "off_policy_prob": off_policy_prob.detach().item(),
+        "on_policy_prob": on_policy_prob.detach().item(), # [MOD]
         "off_ratio_mean": off_ratio_mean.detach().item(),
+        "off_ratio_max_clip_frac": off_ratio_max_clip_frac.detach().item(), # [MOD]
+        "off_ratio_min_clip_frac": off_ratio_min_clip_frac.detach().item(), # [MOD]
     }
 
 

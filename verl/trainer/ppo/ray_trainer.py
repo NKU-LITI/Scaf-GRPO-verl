@@ -1707,7 +1707,7 @@ class RayPPOTrainer:
             if not indices:
                 continue
             wrong_indices = [idx for idx in indices if reward_sums[idx] <=0]
-            expert_replace_idx[uid] = [wrong_indices[0] if wrong_indices else indices[0]]
+            expert_replace_idx[uid] = wrong_indices[0] if wrong_indices else indices[0]
         expert_base_indices = [indices[0] for uid, indices in uid_to_indices.items() if len(indices) > 0]
         expert_base_batch = batch.select_idxs(expert_base_indices) # len=64, len(batch)=512
 

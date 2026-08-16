@@ -271,27 +271,27 @@ class TaskRunner:
         from verl.utils.fs import copy_to_local
 
 
-        # [DEBUG]
-        import os
-        import debugpy
+        # # [DEBUG]
+        # import os
+        # import debugpy
 
-        if os.environ.get("DEBUG_TASK_RUNNER", "0") == "1":
-            debug_port = 5678
+        # if os.environ.get("DEBUG_TASK_RUNNER", "0") == "1":
+        #     debug_port = 5678
 
-            print(
-                f"[TaskRunner Debug] hostname={socket.gethostname()}, "
-                f"pid={os.getpid()}, port={debug_port}",
-                flush=True,
-            )
-            print(
-                "[TaskRunner Debug] waiting for VS Code debugger...",
-                flush=True,
-            )
+        #     print(
+        #         f"[TaskRunner Debug] hostname={socket.gethostname()}, "
+        #         f"pid={os.getpid()}, port={debug_port}",
+        #         flush=True,
+        #     )
+        #     print(
+        #         "[TaskRunner Debug] waiting for VS Code debugger...",
+        #         flush=True,
+        #     )
 
-            debugpy.listen(("127.0.0.1", debug_port))
-            debugpy.wait_for_client()
-            debugpy.breakpoint()
-        # ===== 临时调试代码结束 =====
+        #     debugpy.listen(("127.0.0.1", debug_port))
+        #     debugpy.wait_for_client()
+        #     debugpy.breakpoint()
+        # # ===== 临时调试代码结束 =====
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))

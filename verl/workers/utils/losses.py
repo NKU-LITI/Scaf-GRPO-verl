@@ -70,7 +70,9 @@ def compute_scaf_source_policy_losses(
     if hint_is_weights is not None:
         advantages = advantages * hint_is_weights.detach()
 
+    # Keep diagnostic gradients consistent with the LUFFY-compatible main loss.
     negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
+    # negative_approx_kl = log_prob - old_log_prob
     ratio = torch.exp(negative_approx_kl)
 
     use_mixed_loss = config.get("use_off_policy_loss", False) and off_policy_mask is not None
@@ -210,6 +212,7 @@ def compute_scaf_ppo_policy_loss(
             )
         off_policy_max_clip = config.get("off_policy_max_clip", -1.0)
         off_policy_min_clip = config.get("off_policy_min_clip", -1.0)
+        all_max_clip = config.get("all_max_clip", -1.0)
         off_policy_result = compute_token_on_off_policy_loss(
             old_log_prob=old_log_prob,
             log_prob=log_prob,
@@ -222,8 +225,14 @@ def compute_scaf_ppo_policy_loss(
             clip_ratio_c=config.get("clip_ratio_c", 3.0),
             clip_upper_bound=config.get("clip_upper_bound", 1.0),
             off_policy_reshape=config.get("off_policy_reshape", "p_div_p_0.1"),
+            off_policy_reshape_weight=config.get("off_policy_reshape_weight", 1.0),
+            off_policy_reshape_pow_exp=config.get("off_policy_reshape_pow_exp", 0.5),
+            on_policy_reshape=config.get("on_policy_reshape", "no_reshape"),
+            on_policy_reshape_weight=config.get("on_policy_reshape_weight", 1.0),
+            on_policy_reshape_pow_exp=config.get("on_policy_reshape_pow_exp", 0.5),
             off_policy_max_clip=off_policy_max_clip if off_policy_max_clip >= 0 else None,
             off_policy_min_clip=off_policy_min_clip if off_policy_min_clip >= 0 else None,
+            all_max_clip=all_max_clip if all_max_clip >= 0 else None,
             loss_agg_mode=loss_agg_mode,
             global_batch_info=config.get("global_batch_info", {}),
             rollout_is_weights=rollout_is_weights,
@@ -240,6 +249,10 @@ def compute_scaf_ppo_policy_loss(
             "actor/off_pg_loss": off_policy_result["off_pg_loss"],
             "actor/off_ratio_mean": off_policy_result["off_ratio_mean"],
             "actor/off_policy_prob": off_policy_result["off_policy_prob"],
+            "actor/on_policy_prob": off_policy_result["on_policy_prob"],
+            "actor/off_pg_clipfrac": off_policy_result["off_pg_clipfrac"],
+            "actor/off_ratio_max_clip_frac": off_policy_result["off_ratio_max_clip_frac"],
+            "actor/off_ratio_min_clip_frac": off_policy_result["off_ratio_min_clip_frac"],
         }
     else:
         policy_loss_fn = get_policy_loss_fn(loss_mode)
@@ -400,6 +413,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             )
         off_policy_max_clip = config.get("off_policy_max_clip", -1.0)
         off_policy_min_clip = config.get("off_policy_min_clip", -1.0)
+        all_max_clip = config.get("all_max_clip", -1.0)
         off_policy_result = compute_token_on_off_policy_loss(
             old_log_prob=old_log_prob,
             log_prob=log_prob,
@@ -412,12 +426,20 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             clip_ratio_c=config.get("clip_ratio_c", 3.0),
             clip_upper_bound=config.get("clip_upper_bound", 1.0),
             off_policy_reshape=config.get("off_policy_reshape", "p_div_p_0.1"),
+            off_policy_reshape_weight=config.get("off_policy_reshape_weight", 1.0),
+            off_policy_reshape_pow_exp=config.get("off_policy_reshape_pow_exp", 0.5),
+            on_policy_reshape=config.get("on_policy_reshape", "no_reshape"),
+            on_policy_reshape_weight=config.get("on_policy_reshape_weight", 1.0),
+            on_policy_reshape_pow_exp=config.get("on_policy_reshape_pow_exp", 0.5),
             off_policy_max_clip=off_policy_max_clip if off_policy_max_clip >= 0 else None,
             off_policy_min_clip=off_policy_min_clip if off_policy_min_clip >= 0 else None,
+            all_max_clip=all_max_clip if all_max_clip >= 0 else None,
             loss_agg_mode=loss_agg_mode,
             global_batch_info=config.global_batch_info,
             rollout_is_weights=rollout_is_weights,
             off_policy_loss_type=config.get("off_policy_loss_type", "probability"),
+            loss_remove_clip=config.get("loss_remove_clip", False),
+            loss_remove_token_mean=config.get("loss_remove_token_mean", False),
         )
         pg_loss = off_policy_result["pg_loss"]
         pg_metrics = {
@@ -428,6 +450,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             "actor/off_pg_loss": off_policy_result["off_pg_loss"],
             "actor/off_ratio_mean": off_policy_result["off_ratio_mean"],
             "actor/off_policy_prob": off_policy_result["off_policy_prob"],
+            "actor/on_policy_prob": off_policy_result["on_policy_prob"],
+            "actor/off_pg_clipfrac": off_policy_result["off_pg_clipfrac"],
+            "actor/off_ratio_max_clip_frac": off_policy_result["off_ratio_max_clip_frac"],
+            "actor/off_ratio_min_clip_frac": off_policy_result["off_ratio_min_clip_frac"],
         }
     else:
         # [LOC] 没有注入专家轨迹，只有hint走这里

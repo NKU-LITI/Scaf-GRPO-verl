@@ -106,11 +106,21 @@ off_policy_loss_type: probability
 # [ADD] Scaf-GRPO: probability reshape used when expert behavior-policy probabilities are unavailable.
 off_policy_reshape: p_div_p_0.1
 
+# LUFFY-compatible reshape controls.
+off_policy_reshape_weight: 1.0
+off_policy_reshape_pow_exp: 0.5
+on_policy_reshape: no_reshape
+on_policy_reshape_weight: 1.0
+on_policy_reshape_pow_exp: 0.5
+
 # [ADD] Scaf-GRPO: optional upper bound for off-policy token weight. Negative disables clipping.
 off_policy_max_clip: -1.0
 
 # [ADD] Scaf-GRPO: optional lower bound for off-policy token weight. Negative disables clipping.
 off_policy_min_clip: -1.0
+
+# LUFFY-compatible global probability filter. Negative disables filtering.
+all_max_clip: -1.0
 
 # [ADD] Scaf-GRPO: upper PPO ratio bound used by mixed on/off-policy loss on-policy branch.
 clip_upper_bound: 1.0

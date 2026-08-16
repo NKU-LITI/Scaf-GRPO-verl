@@ -29,14 +29,14 @@ set -euo pipefail
 
 source /home/liting/miniconda3/etc/profile.d/conda.sh
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3,4}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_expert_luffy_again_withgrad}"  # qwen25_math7b_stratified_expert_weight_adv
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_stratified_expert_luffy_all_normalization_entropy}"  # qwen25_math7b_stratified_expert_weight_adv
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -116,7 +116,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.with_hint=False \
     trainer.with_expert_fallback=True \
     trainer.hint_stage_count=3 \
-    trainer.replace_hint_prompt_response=True \
+    trainer.replace_hint_prompt_response=False \
     trainer.replace_num=1 \
     trainer.expert_truncation=left \
     \
@@ -144,6 +144,3 @@ python3 -m verl.trainer.main_ppo \
     # actor_rollout_ref.rollout.max_model_len=12288 \
 
     # actor_rollout_ref.actor.off_policy_loss_type=advantage_weighted_log_prob  或者  probability
-
-# 为了修改峰值，能在73G剩余空间下运行：
-# optimizer_offload 从 False 改为 True

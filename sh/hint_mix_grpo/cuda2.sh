@@ -6,7 +6,7 @@ source /home/liting/miniconda3/etc/profile.d/conda.sh
 
 
 
-TARGET_PIDS=(1467261 1467262)
+TARGET_PIDS=(2674653 2674654)
 
 # TARGET_PIDS=(1795604 1795601)
 
