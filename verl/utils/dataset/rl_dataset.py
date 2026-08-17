@@ -52,9 +52,11 @@ def _normalize_scaf_expert_target(row_dict: dict):
             return normalize(value.get("content"))
         return value if isinstance(value, str) else None
 
-    # 从这些字段中读取专家轨迹，命名为"expert_target"，后续 ray_trainer.py 中使用 batch.non_tensor_batch["expert_target"]
-    # for key in ("expert_target", "solution_breakdown_cot_answer", "expert_trajectory", "target"): 
-    for key in ("solution_breakdown_cot_answer",): 
+    # 从 Qwen 模型专家轨迹字段读取，命名为"expert_target"，后续 ray_trainer.py 中使用 batch.non_tensor_batch["expert_target"]
+    # 原先读取字段：
+    # for key in ("solution_breakdown_cot_answer",):
+    # for key in ("expert_target", "solution_breakdown_cot_answer", "expert_trajectory", "target"):
+    for key in ("qwen_expert_trajectory",):
         value = row_dict.get(key)
         expert_target = normalize(value)
         if expert_target:

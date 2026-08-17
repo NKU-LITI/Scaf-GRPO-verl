@@ -24,6 +24,13 @@ from pathlib import Path
 from typing import Any
 
 
+def _experiment_subdir(experiment_name, subdir: str) -> str:
+    exp_dir = Path(os.path.expanduser(str(experiment_name or ".")))
+    output_dir = exp_dir / subdir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir)
+
+
 class Tracking:
     """A unified tracking interface for logging experiment data to multiple backends.
 
@@ -68,8 +75,28 @@ class Tracking:
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
+            wandb_dir = _experiment_subdir(experiment_name, "wandb")
+            os.environ["WANDB_MODE"] = "offline"
+            os.environ["WANDB_DIR"] = wandb_dir
+            for env_name, dirname in (
+                ("WANDB_CACHE_DIR", "cache"),
+                ("WANDB_CONFIG_DIR", "config"),
+                ("WANDB_DATA_DIR", "data"),
+                ("WANDB_ARTIFACT_DIR", "artifacts"),
+            ):
+                path = Path(wandb_dir) / dirname
+                path.mkdir(parents=True, exist_ok=True)
+                os.environ[env_name] = str(path)
             entity = os.environ.get("WANDB_ENTITY", None)
-            wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
+            wandb.init(
+                project=project_name,
+                name=experiment_name,
+                entity=entity,
+                config=config,
+                settings=settings,
+                dir=wandb_dir,
+                mode="offline",
+            )
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:
@@ -143,7 +170,7 @@ class Tracking:
             self.logger["vemlp_wandb"] = vemlp_wandb
 
         if "tensorboard" in default_backend:
-            self.logger["tensorboard"] = _TensorboardAdapter(project_name, experiment_name)
+            self.logger["tensorboard"] = _TensorboardAdapter(experiment_name)
 
         if "console" in default_backend:
             from verl.utils.logger import LocalLogger
@@ -272,13 +299,10 @@ class FileLogger:
 
 
 class _TensorboardAdapter:
-    def __init__(self, project_name, experiment_name):
-        import os
-
+    def __init__(self, experiment_name):
         from torch.utils.tensorboard import SummaryWriter
 
-        tensorboard_dir = os.environ.get("TENSORBOARD_DIR", f"tensorboard_log/{project_name}/{experiment_name}")
-        os.makedirs(tensorboard_dir, exist_ok=True)
+        tensorboard_dir = _experiment_subdir(experiment_name, "tensorboard")
         print(f"Saving tensorboard log to {tensorboard_dir}.")
         self.writer = SummaryWriter(tensorboard_dir)
 
@@ -491,14 +515,7 @@ class ValidationGenerationsLogger:
         if not hasattr(self, "writer"):
             from torch.utils.tensorboard import SummaryWriter
 
-            # Use the same directory structure as _TensorboardAdapter
-            if self.project_name and self.experiment_name:
-                default_dir = os.path.join("tensorboard_log", self.project_name, self.experiment_name)
-            else:
-                default_dir = "tensorboard_log"
-
-            tensorboard_dir = os.environ.get("TENSORBOARD_DIR", default_dir)
-            os.makedirs(tensorboard_dir, exist_ok=True)
+            tensorboard_dir = _experiment_subdir(self.experiment_name, "tensorboard")
             self.writer = SummaryWriter(log_dir=tensorboard_dir)
 
         # Format the samples data into readable text

@@ -71,9 +71,25 @@ def compute_scaf_source_policy_losses(
         advantages = advantages * hint_is_weights.detach()
 
     # Keep diagnostic gradients consistent with the LUFFY-compatible main loss.
-    negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
-    # negative_approx_kl = log_prob - old_log_prob
-    ratio = torch.exp(negative_approx_kl)
+    negative_approx_kl = log_prob - old_log_prob
+    on_policy_reshape = config.get("on_policy_reshape", "no_reshape")
+    if on_policy_reshape == "no_reshape":
+        ratio = torch.exp(negative_approx_kl)
+    elif on_policy_reshape == "logp":
+        ratio = negative_approx_kl
+    elif on_policy_reshape == "p_logp":
+        ratio = torch.exp(negative_approx_kl) + config.get("on_policy_reshape_weight", 1.0) * negative_approx_kl
+    elif on_policy_reshape == "square_root":
+        ratio = torch.sqrt(torch.exp(negative_approx_kl))
+    elif on_policy_reshape == "pow":
+        ratio = torch.pow(torch.exp(negative_approx_kl), config.get("on_policy_reshape_pow_exp", 0.5))
+    elif on_policy_reshape in ("p_div_p_0.1", "p_div_p_0.5"):
+        offset = 0.1 if on_policy_reshape == "p_div_p_0.1" else 0.5
+        prob = torch.exp(log_prob)
+        old_prob = torch.exp(old_log_prob)
+        ratio = (prob / (prob + offset)) / (old_prob / (old_prob + offset))
+    else:
+        raise ValueError(f"Invalid on_policy_reshape: {on_policy_reshape}")
 
     use_mixed_loss = config.get("use_off_policy_loss", False) and off_policy_mask is not None
     if use_mixed_loss:
@@ -112,10 +128,22 @@ def compute_scaf_source_policy_losses(
                 off_ratio = prob / (prob + 0.3)
             elif off_policy_reshape == "p_div_p_0.5":
                 off_ratio = prob / (prob + 0.5)
+            elif off_policy_reshape == "offratio_detach":
+                off_ratio = prob / (prob + 0.1)
+            elif off_policy_reshape == "prob_detach":
+                off_ratio = prob
+            elif off_policy_reshape == "onratio":
+                off_ratio = ratio
             elif off_policy_reshape in ("p", "no_reshape"):
                 off_ratio = prob
-            elif off_policy_reshape in ("square_root", "pow"):
+            elif off_policy_reshape == "logp":
+                off_ratio = log_prob * config.get("off_policy_reshape_weight", 1.0)
+            elif off_policy_reshape == "p_logp":
+                off_ratio = prob + log_prob * config.get("off_policy_reshape_weight", 1.0)
+            elif off_policy_reshape == "square_root":
                 off_ratio = torch.sqrt(prob)
+            elif off_policy_reshape == "pow":
+                off_ratio = torch.pow(prob, config.get("off_policy_reshape_pow_exp", 0.5))
             else:
                 raise ValueError(f"Unsupported off_policy_reshape: {off_policy_reshape}")
 
@@ -125,7 +153,12 @@ def compute_scaf_source_policy_losses(
                 off_ratio = torch.clamp(off_ratio, max=off_policy_max_clip)
             if off_policy_min_clip >= 0:
                 off_ratio = torch.clamp(off_ratio, min=off_policy_min_clip)
-            off_pg_losses = -advantages * off_ratio
+            if off_policy_reshape == "offratio_detach":
+                off_pg_losses = -(advantages * off_ratio).detach() * log_prob
+            elif off_policy_reshape == "prob_detach":
+                off_pg_losses = -(advantages * off_ratio).detach() * log_prob
+            else:
+                off_pg_losses = -advantages * off_ratio
         else:
             raise ValueError(
                 "off_policy_loss_type must be 'probability' or 'advantage_weighted_log_prob'; "

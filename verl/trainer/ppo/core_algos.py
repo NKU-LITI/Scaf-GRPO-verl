@@ -1588,8 +1588,10 @@ def compute_token_on_off_policy_loss(
     # [MOD] luffy没有这部分clip
     # negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
     negative_approx_kl = log_prob - old_log_prob
+
     if on_policy_reshape == "no_reshape":
         ratio = torch.exp(negative_approx_kl)
+
     elif on_policy_reshape == "logp":
         ratio = negative_approx_kl
     elif on_policy_reshape == "p_logp":
@@ -1648,52 +1650,67 @@ def compute_token_on_off_policy_loss(
 
     prob = torch.exp(log_prob)
     
-    if off_policy_loss_type == "advantage_weighted_log_prob":
-        # dL/dlog(pi) = -A.
-        off_pg_losses = -advantages * log_prob
-        off_ratio = torch.ones_like(log_prob)
-    elif off_policy_loss_type == "probability":
-        if target_probs is not None:
-            if target_probs.shape != log_prob.shape:
-                raise ValueError(
-                    f"target_probs must match log_prob shape; got {target_probs.shape} and {log_prob.shape}."
-                )
-            off_ratio = prob / (target_probs + 1e-6)
-            off_ratio = off_ratio * off_policy_mask
-        else:
-            if off_policy_reshape in ("p", "no_reshape"):
-                pass
-            elif off_policy_reshape == "logp":
-                off_ratio = log_prob * off_policy_reshape_weight
-            elif off_policy_reshape == "p_logp":
-                off_ratio = prob + log_prob * off_policy_reshape_weight
-            elif off_policy_reshape == "square_root":
-                off_ratio = torch.sqrt(prob)
-            elif off_policy_reshape == "p_div_p_0.1":
-                off_ratio = prob / (prob + 0.1)
-            elif off_policy_reshape == "p_div_p_0.3":
-                off_ratio = prob / (prob + 0.3)
-            elif off_policy_reshape == "p_div_p_0.5":
-                off_ratio = prob / (prob + 0.5)
-            elif off_policy_reshape in ("p", "no_reshape"):
-                off_ratio = prob
-            elif off_policy_reshape in ("square_root", "pow"):
-                off_ratio = torch.sqrt(prob)
-            else:
-                raise ValueError(f"Unsupported off_policy_reshape: {off_policy_reshape}")
-
-        if off_policy_max_clip is not None:
-            off_ratio = torch.clamp(off_ratio, max=off_policy_max_clip)
-        if off_policy_min_clip is not None:
-            off_ratio = torch.clamp(off_ratio, min=off_policy_min_clip)
-
-        # off_pg_losses = -advantages * off_ratio # * 2
-        off_pg_losses = -(advantages * off_ratio).detach() * log_prob # [MOD]
+    # if off_policy_loss_type == "advantage_weighted_log_prob":
+    #     # dL/dlog(pi) = -A.
+    #     off_pg_losses = -advantages * log_prob
+    #     off_ratio = torch.ones_like(log_prob)
+    # elif off_policy_loss_type == "probability":
+    if target_probs is not None:
+        if target_probs.shape != log_prob.shape:
+            raise ValueError(
+                f"target_probs must match log_prob shape; got {target_probs.shape} and {log_prob.shape}."
+            )
+        off_ratio = prob / (target_probs + 1e-6)
+        off_ratio = off_ratio * off_policy_mask
     else:
-        raise ValueError(
-            "off_policy_loss_type must be 'probability' or 'advantage_weighted_log_prob'; "
-            f"got {off_policy_loss_type!r}."
-        )
+        if off_policy_reshape in ("p", "no_reshape"):
+            off_ratio = prob
+        elif off_policy_reshape == "logp":
+            off_ratio = log_prob * off_policy_reshape_weight
+        elif off_policy_reshape == "p_logp":
+            off_ratio = prob + log_prob * off_policy_reshape_weight
+        elif off_policy_reshape == "square_root":
+            off_ratio = torch.sqrt(prob)
+        elif off_policy_reshape == "p_div_p_0.1":
+            off_ratio = prob / (prob + 0.1)
+        elif off_policy_reshape == "p_div_p_0.3":
+            off_ratio = prob / (prob + 0.3)
+        elif off_policy_reshape == "p_div_p_0.5":
+            off_ratio = prob / (prob + 0.5)
+        elif off_policy_reshape == "pow":
+            off_ratio = torch.pow(prob, off_policy_reshape_pow_exp)
+        elif off_policy_reshape == "offratio_detach":
+            off_ratio = prob / (prob + 0.1)
+        elif off_policy_reshape == "prob_detach":
+            off_ratio = prob
+        elif off_policy_reshape == "onratio":
+            off_ratio = ratio
+        else:
+            raise ValueError(f"Unsupported off_policy_reshape: {off_policy_reshape}")
+
+    if off_policy_max_clip is not None:
+        off_ratio = torch.clamp(off_ratio, max=off_policy_max_clip)
+    if off_policy_min_clip is not None:
+        off_ratio = torch.clamp(off_ratio, min=off_policy_min_clip)
+
+    if off_policy_reshape == "offratio_detach":
+        off_pg_losses = -(advantages * off_ratio).detach() * log_prob
+    elif off_policy_reshape == "prob_detach":
+        off_pg_losses = -(advantages * off_ratio).detach() * log_prob
+    # elif off_policy_reshape == "onratio":
+    #     off_pg_losses = -advantages * off_ratio
+    else:
+        off_pg_losses = -advantages * off_ratio
+
+    # off_pg_losses = -advantages * off_ratio # * 2
+    # off_pg_losses = -(advantages * off_ratio).detach() * log_prob # [MOD]
+    # off_pg_losses = -advantages * ratio
+
+    # else:
+    #     raise ValueError(
+    #         "off_policy_loss_type must be 'probability' or 'advantage_weighted_log_prob'; "
+    #         f"got {off_policy_loss_type!r}."
+    #     )
 
     off_ratio_max_clip_frac = safe_masked_mean((off_ratio == off_policy_max_clip).float(), off_policy_mask
                                                ) if off_policy_max_clip is not None else log_prob.sum() * 0.0 # expert token中触发lower clip的比例

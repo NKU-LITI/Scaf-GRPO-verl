@@ -1451,15 +1451,15 @@ class RayPPOTrainer:
         return ref_log_prob
 
     def _compute_old_log_prob(self, batch: DataProto):
-        if self.use_legacy_worker_impl == "disable":
+        if self.use_legacy_worker_impl == "disable": # [GO]
             # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
             # step 1: convert dataproto to tensordict.
             batch_td = batch.to_tensordict()
             # step 2: convert from padding to nopadding
             batch_td = left_right_2_no_padding(batch_td)
             # step 3: add meta info
-            tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False) # 计算log_prob和entropy，不要loss/backward
+            output = self.actor_rollout_wg.compute_log_prob(batch_td) # actor model forward一次
             # gather output
             entropy = tu.get(output, "entropy")
             log_probs = tu.get(output, "log_probs")
@@ -1631,7 +1631,7 @@ class RayPPOTrainer:
 
         if hint_enabled and "question" in failed_base_batch.non_tensor_batch:
             # 2. 构造分层hint prompt
-            hinted_gen_batch = build_hinted_gen_batch(failed_base_batch, stage_count=self.hint_stage_count) # train_batch_size * 12(如果是三层Hint)
+            hinted_gen_batch = build_hinted_gen_batch(failed_base_batch, stage_count=self.hint_stage_count) # 错题数*12 (如果是三层Hint)
 
             if len(hinted_gen_batch) > 0:
                 hinted_gen_batch.meta_info["global_steps"] = self.global_steps
@@ -1682,8 +1682,8 @@ class RayPPOTrainer:
 
                 # 只替换response，添加IS ratio修正项
                 if hint_data_map and not self.replace_hint_prompt_response and hint_is_enabled:
-                    if "rollout_log_probs" in hinted_output.batch:
-                        hint_behavior_log_probs = hinted_output.batch["rollout_log_probs"].detach().float()
+                    if "rollout_log_probs" in hinted_output.batch: # 无
+                        hint_behavior_log_probs = hinted_output.batch["rollout_log_probs"].detach().float() # [ 错题数*12, 2048]
                     else:
                         hinted_old_log_prob_padded, _ = self._compute_old_log_prob(hinted_output_padded)
                         hinted_old_log_prob = unpad_dataproto(
@@ -1701,15 +1701,19 @@ class RayPPOTrainer:
                         len(batch), dtype=torch.bool, device=response_mask.device
                     )
 
-        # [MOD] 按照Luffy实现全替换，优先错误替换，做对照
+        # [MOD] 按照 Luffy 全替换设置，每个 UID 直接选择第一条 rollout。
+        # rollout 在进入这里前已经是随机采样结果，因此有对有错时不再优先选择错误轨迹。
         expert_replace_idx = {}
         for uid, indices in uid_to_indices.items():
             if not indices:
                 continue
-            wrong_indices = [idx for idx in indices if reward_sums[idx] <=0]
-            expert_replace_idx[uid] = wrong_indices[0] if wrong_indices else indices[0]
+            # 原先优先替换错误轨迹：
+            # wrong_indices = [idx for idx in indices if reward_sums[idx] <= 0]
+            # expert_replace_idx[uid] = wrong_indices[0] if wrong_indices else indices[0]
+            expert_replace_idx[uid] = indices[0]
         expert_base_indices = [indices[0] for uid, indices in uid_to_indices.items() if len(indices) > 0]
         expert_base_batch = batch.select_idxs(expert_base_indices) # len=64, len(batch)=512
+        # expert_base_batch = failed_base_batch
 
         expert_data_map = {}
         if expert_enabled and "expert_target" in expert_base_batch.non_tensor_batch: # [MOD] failed_base_batch
@@ -1763,7 +1767,7 @@ class RayPPOTrainer:
                     if hint_is_enabled:
                         batch.batch["hint_behavior_log_probs"][row_idx] = hinted_output.batch[
                             "hint_behavior_log_probs"
-                        ][hint_idx].to(batch.batch["hint_behavior_log_probs"].device)
+                        ][hint_idx].to(batch.batch["hint_behavior_log_probs"].device) # shape=[2048]
                         batch.batch["hint_offpolicy_mask"][row_idx] = True
 
                 batch.batch["hint_sft_loss_mask"][row_idx] = batch.batch["response_mask"][row_idx]
@@ -1773,7 +1777,9 @@ class RayPPOTrainer:
                 per_uid_replaced[uid] += 1
 
 
-            elif (uid in expert_data_map and row_idx == expert_replace_idx.get(uid)) :
+            # 原先未限制具体索引，会按照遍历顺序持续替换到 replace_num：
+            # elif uid in expert_data_map:
+            elif uid in expert_data_map and row_idx == expert_replace_idx.get(uid):
                 expert_data = expert_data_map[uid]
 
                 # expert_data包含：responses,input_ids,attention_mask,position_ids,response_mask,sft_loss_mask,off_policy_mask
@@ -2086,8 +2092,7 @@ class RayPPOTrainer:
 
                     hint_is_enabled = self.config.algorithm.get("hint_is_correction", True)
                     hint_offpolicy_mask = batch.batch.get("hint_offpolicy_mask", None)
-                    if (
-                        hint_is_enabled
+                    if (hint_is_enabled
                         and hint_offpolicy_mask is not None
                         and torch.any(hint_offpolicy_mask.to(torch.bool))
                     ):

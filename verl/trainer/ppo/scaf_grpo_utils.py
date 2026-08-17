@@ -55,11 +55,13 @@ def build_hinted_gen_batch(base_batch: DataProto, stage_count: int = 3) -> DataP
 
     raw_prompts = []
     uids = []
-    hint_levels = []
+    hint_levels = [] # 三层
+    hint_counts = [] # 12层
     reward_model_out = []
     data_source_out = []
 
     for i in range(len(questions)):
+        hint_count_global = 0
         for hint_stage, (stage_key, hint_label) in enumerate(all_stages[:stage_count], start=1):
             raw_parts = base_batch.non_tensor_batch.get(stage_key, [[] for _ in range(len(questions))])[i]
             if not isinstance(raw_parts, (list, tuple, np.ndarray)):
@@ -67,6 +69,7 @@ def build_hinted_gen_batch(base_batch: DataProto, stage_count: int = 3) -> DataP
             parts = [str(part).strip() for part in raw_parts if str(part).strip()]
 
             for hint_count in range(1, len(parts) + 1):
+                hint_count_global += 1
                 content = f"Question: {questions[i]}\n{hint_label}: {' '.join(parts[:hint_count])}"
                 raw_prompts.append(
                     [
@@ -79,14 +82,17 @@ def build_hinted_gen_batch(base_batch: DataProto, stage_count: int = 3) -> DataP
                 )
                 uids.append(original_uids[i])
                 hint_levels.append(hint_stage)
+                hint_counts.append(hint_count_global)
                 reward_model_out.append(reward_models[i])
                 data_source_out.append(data_sources[i])
+
 
     data = {
         "dummy_tensor": torch.zeros((len(raw_prompts), 1), dtype=torch.uint8),
         "raw_prompt": np.asarray(raw_prompts, dtype=object),
         "uid": np.asarray(uids, dtype=object),
         "hint_level": np.asarray(hint_levels, dtype=object),
+        "hint_count": np.asarray(hint_counts, dtype=object), 
         "reward_model": np.asarray(reward_model_out, dtype=object),
         "data_source": np.asarray(data_source_out, dtype=object),
     }

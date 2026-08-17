@@ -10,7 +10,7 @@ from verl.trainer.ppo.scaf_grpo_utils import (
     build_hinted_gen_batch,
     normalize_expert_target,
 )
-from verl.workers.utils.losses import compute_scaf_ppo_policy_loss
+from verl.workers.utils.losses import compute_scaf_ppo_policy_loss, compute_scaf_source_policy_losses
 
 
 def _actor_config(loss_mode: str = "vanilla"):
@@ -141,6 +141,50 @@ def test_probability_objective_matches_luffy_p_div_p_point_one():
     assert result["off_pg_loss"] == pytest.approx(expected_off_loss)
     assert result["on_pg_loss"] == pytest.approx(expected_on_loss)
     assert result["pg_loss"].item() == pytest.approx((expected_off_loss + expected_on_loss) / 2)
+
+
+@pytest.mark.parametrize(
+    ("off_policy_reshape", "expected_grad"),
+    [
+        ("offratio_detach", [[-0.15, -0.225]]),
+        ("prob_detach", [[-0.15, -0.225]]),
+        ("onratio", [[0.0, 0.0]]),
+    ],
+)
+def test_off_policy_loss_variants_match_source_gradient_diagnostics(off_policy_reshape, expected_grad):
+    config = _actor_config()
+    config.off_policy_reshape = off_policy_reshape
+    config.off_policy_max_clip = 0.15
+    old_log_prob = torch.log(torch.tensor([[0.1, 0.2]]))
+    log_prob = torch.log(torch.tensor([[0.2, 0.4]])).requires_grad_()
+    advantages = torch.tensor([[2.0, 3.0]])
+    response_mask = torch.ones_like(log_prob, dtype=torch.bool)
+    off_policy_mask = torch.ones_like(log_prob, dtype=torch.bool)
+
+    result = compute_token_on_off_policy_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        off_policy_mask=off_policy_mask,
+        cliprange=config.clip_ratio,
+        off_policy_reshape=off_policy_reshape,
+        off_policy_max_clip=config.off_policy_max_clip,
+    )
+    source_loss = compute_scaf_source_policy_losses(
+        config=config,
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        off_policy_mask=off_policy_mask,
+    )["expert"]
+
+    torch.testing.assert_close(result["pg_loss"], source_loss)
+    main_grad = torch.autograd.grad(result["pg_loss"], log_prob, retain_graph=True)[0]
+    source_grad = torch.autograd.grad(source_loss, log_prob)[0]
+    torch.testing.assert_close(main_grad, source_grad)
+    torch.testing.assert_close(main_grad, torch.tensor(expected_grad))
 
 
 def test_expert_sft_loss_only_uses_marked_response_tokens():
