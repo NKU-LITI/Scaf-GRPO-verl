@@ -50,7 +50,11 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
-from verl.trainer.ppo.scaf_grpo_utils import build_expert_response_data, build_hinted_gen_batch
+from verl.trainer.ppo.scaf_grpo_utils import (
+    build_expert_response_data,
+    build_hinted_gen_batch,
+    select_expert_injection_uids,
+)
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
@@ -404,6 +408,7 @@ class RayPPOTrainer:
         if self.hint_stage_count not in (1, 2, 3):
             raise ValueError(f"trainer.hint_stage_count must be 1, 2, or 3; got {self.hint_stage_count}.")
         self.with_expert_fallback = self.config.trainer.get("with_expert_fallback", False)
+        self.inject_expert_for_all_uids = self.config.trainer.get("inject_expert_for_all_uids", False)
         self.replace_hint_prompt_response = self.config.trainer.get("replace_hint_prompt_response", True)
         self.replace_num = int(self.config.trainer.get("replace_num", 1))
         # [ADD] `apply_bypass_mode` mutates this config. Retain the configured loss mode so mutated Scaf-GRPO batches can safely recompute old log-probs.
@@ -1701,29 +1706,32 @@ class RayPPOTrainer:
                         len(batch), dtype=torch.bool, device=response_mask.device
                     )
 
-        # [MOD] 按照 Luffy 全替换设置，每个 UID 直接选择第一条 rollout。
-        # rollout 在进入这里前已经是随机采样结果，因此有对有错时不再优先选择错误轨迹。
+        expert_candidate_uids = select_expert_injection_uids(
+            uid_to_indices.keys(),
+            fully_failed_uids,
+            inject_for_all_uids=self.inject_expert_for_all_uids,
+        )
+
+        # rollout 在进入这里前已经是随机采样结果，每个候选 UID 替换第一条轨迹。
         expert_replace_idx = {}
         for uid, indices in uid_to_indices.items():
-            if not indices:
+            if not indices or uid not in expert_candidate_uids:
                 continue
-            # 原先优先替换错误轨迹：
-            # wrong_indices = [idx for idx in indices if reward_sums[idx] <= 0]
-            # expert_replace_idx[uid] = wrong_indices[0] if wrong_indices else indices[0]
             expert_replace_idx[uid] = indices[0]
-        expert_base_indices = [indices[0] for uid, indices in uid_to_indices.items() if len(indices) > 0]
-        expert_base_batch = batch.select_idxs(expert_base_indices) # len=64, len(batch)=512
-        # expert_base_batch = failed_base_batch
+        expert_base_indices = [
+            indices[0]
+            for uid, indices in uid_to_indices.items()
+            if indices and uid in expert_candidate_uids
+        ]
+        expert_base_batch = batch.select_idxs(expert_base_indices)
 
         expert_data_map = {}
-        if expert_enabled and "expert_target" in expert_base_batch.non_tensor_batch: # [MOD] failed_base_batch
+        if expert_enabled and "expert_target" in expert_base_batch.non_tensor_batch:
             expert_truncation = self.config.trainer.get("expert_truncation", "right")
             max_response_length = self.config.data.max_response_length
-            for row_idx, uid in enumerate(expert_base_batch.non_tensor_batch["uid"]): # [MOD] failed_base_batch
-                # if uid not in fully_failed_uids: # [MOD]
-                #    continue
+            for row_idx, uid in enumerate(expert_base_batch.non_tensor_batch["uid"]):
                 expert_data = build_expert_response_data(
-                    expert_base_batch, # [MOD] failed_base_batch
+                    expert_base_batch,
                     row_idx,
                     self.tokenizer,
                     max_response_length=max_response_length,

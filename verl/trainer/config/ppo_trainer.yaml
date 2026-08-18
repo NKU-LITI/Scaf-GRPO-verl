@@ -143,6 +143,9 @@ trainer:
   # [ADD] Scaf-GRPO: inject expert trajectory when all hinted rollouts fail.
   with_expert_fallback: false
 
+  # [ADD] Scaf-GRPO: inject experts regardless of initial pass@k; false limits injection to pass@k=0 groups.
+  inject_expert_for_all_uids: false
+
   # [ADD] Scaf-GRPO: false keeps original prompt and only replaces response when hint succeeds.
   replace_hint_prompt_response: true
 

@@ -115,6 +115,7 @@ python3 -m verl.trainer.main_ppo \
     \
     trainer.with_hint=False \
     trainer.with_expert_fallback=True \
+    trainer.inject_expert_for_all_uids=True \
     trainer.hint_stage_count=3 \
     trainer.replace_hint_prompt_response=False \
     trainer.replace_num=1 \

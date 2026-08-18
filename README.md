@@ -118,6 +118,10 @@ For each GRPO group:
 5. If all hint trajectories fail, optionally replace one failed trajectory with expert_target.
 6. Keep the group size unchanged, then recompute rewards for replaced rows and run GRPO/PPO.
 
+By default, expert injection is limited to groups whose initial rollout has pass@k = 0. Set
+`trainer.inject_expert_for_all_uids=true` to make every group eligible for expert injection,
+regardless of its initial pass@k result. A successful hint replacement still takes precedence.
+
 Expert response tokens are marked with off_policy_mask and sft_loss_mask; selected hint tokens can be marked with hint_sft_loss_mask. Ordinary rollout data remains on-policy, while the intervention trajectories receive their intended auxiliary objectives.
 
 ## Data utilities

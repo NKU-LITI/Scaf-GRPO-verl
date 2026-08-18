@@ -39,6 +39,13 @@ def remove_uids_from_dataproto(data: DataProto, uids_to_remove) -> DataProto:
     return data.select_idxs(keep_indices) if keep_indices else data.slice(0, 0)
 
 
+def select_expert_injection_uids(all_uids, fully_failed_uids, inject_for_all_uids: bool = False) -> set:
+    """Select groups eligible for expert injection under the configured pass@k policy."""
+    if inject_for_all_uids:
+        return set(all_uids)
+    return set(fully_failed_uids)
+
+
 def build_hinted_gen_batch(base_batch: DataProto, stage_count: int = 3) -> DataProto:
     questions = base_batch.non_tensor_batch["question"]
     original_uids = base_batch.non_tensor_batch["uid"]

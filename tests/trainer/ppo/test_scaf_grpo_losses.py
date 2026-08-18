@@ -9,6 +9,7 @@ from verl.trainer.ppo.scaf_grpo_utils import (
     build_expert_response_data,
     build_hinted_gen_batch,
     normalize_expert_target,
+    select_expert_injection_uids,
 )
 from verl.workers.utils.losses import compute_scaf_ppo_policy_loss, compute_scaf_source_policy_losses
 
@@ -34,6 +35,25 @@ def _actor_config(loss_mode: str = "vanilla"):
             "hint_sft_loss_coef": 0.0,
         }
     )
+
+
+def test_expert_injection_defaults_to_fully_failed_uids():
+    selected = select_expert_injection_uids(
+        all_uids=["failed", "passed", "hint_rescued"],
+        fully_failed_uids={"failed"},
+    )
+
+    assert selected == {"failed"}
+
+
+def test_expert_injection_can_ignore_pass_at_k():
+    selected = select_expert_injection_uids(
+        all_uids=["failed", "passed", "hint_rescued"],
+        fully_failed_uids={"failed"},
+        inject_for_all_uids=True,
+    )
+
+    assert selected == {"failed", "passed", "hint_rescued"}
 
 
 def test_mixed_loss_uses_luffy_on_policy_clipping_without_dapo_lower_cap():
