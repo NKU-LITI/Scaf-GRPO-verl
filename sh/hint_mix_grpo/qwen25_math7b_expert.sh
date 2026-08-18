@@ -50,8 +50,8 @@ prompt_tag="system-p1"
 
 
 data_dir="${DATA_DIR:-data/DeepScaler/Qwen2d5_math_7b}"
-data_train_path="${DATA_TRAIN_PATH:-${data_dir}/train_800.success_rate_k8.parquet}"
-data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.parquet}"
+data_train_path="${DATA_TRAIN_PATH:-${data_dir}/train_800.success_rate_k8.right.parquet}"
+data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.right.parquet}"
 
 
 # epoch=2, step=24, warmup_steps内lr线性增加到设置的值
@@ -64,10 +64,10 @@ python3 -m verl.trainer.main_ppo \
     data.seed="${DATA_SEED}" \
     data.train_batch_size=64 \
     data.val_batch_size=64 \
-    data.max_prompt_length=4096 \
+    data.max_prompt_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation=error \
-    data.max_response_length=2048 \
+    data.max_response_length=4096 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -108,7 +108,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.n_gpus_per_node=2 \
     trainer.total_epochs=10 \
-    trainer.save_freq=20 \
+    trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.val_before_train=True \
     trainer.warmup_steps=5 \
@@ -144,3 +144,5 @@ python3 -m verl.trainer.main_ppo \
     # actor_rollout_ref.rollout.max_model_len=12288 \
 
     # actor_rollout_ref.actor.off_policy_loss_type=advantage_weighted_log_prob  或者  probability
+
+    # trainer.save_freq=-1 # -1则中间和最后都不保存，>total_steps中间不保存最后保存

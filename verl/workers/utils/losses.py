@@ -215,7 +215,7 @@ def compute_scaf_source_policy_losses(
     return losses
 
 
-# [ADD] loss计算
+# [ADD] rollout/hint/expert loss
 def compute_scaf_ppo_policy_loss(
     config,
     old_log_prob: torch.Tensor,
